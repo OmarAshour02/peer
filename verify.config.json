@@ -1,0 +1,28 @@
+{
+  "project": "peer",
+  "baseBranches": ["main", "origin/main"],
+  "reportsDir": ".peer-dev/verify",
+  "checks": [
+    { "name": "typecheck", "command": ["npm", "run", "typecheck"], "required": true },
+    { "name": "lint", "command": ["npm", "run", "lint"], "required": false },
+    { "name": "test", "command": ["npm", "test"], "required": true },
+    { "name": "build", "command": ["npm", "run", "build"], "required": true }
+  ],
+  "codex": {
+    "model": "gpt-6.1-sol",
+    "effort": "medium",
+    "timeoutMinutes": 25
+  },
+  "reviewer": {
+    "instructions": "scripts/verify/reviewer/instructions.md",
+    "rubrics": ["scripts/verify/reviewer/peer-rubric.md"],
+    "schema": "scripts/verify/reviewer/report.schema.json"
+  },
+  "snapshot": {
+    "exclude": ["release-next/"],
+    "linkIgnored": ["node_modules", "vendor"]
+  },
+  "loop": {
+    "maxRepairCycles": 2
+  }
+}

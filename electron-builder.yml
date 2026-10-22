@@ -1,0 +1,60 @@
+# Packaging for macOS (DMG + zip, arm64 and x64) and Linux (AppImage + deb, x64 and arm64).
+# Build one target per invocation so the matching OpenCode runtime binary is bundled:
+#   node scripts/fetch-opencode.mjs --target mac-arm64 && npx electron-builder --mac --arm64
+appId: dev.peer.app
+productName: Peer
+copyright: Copyright © 2026 Peer Team
+directories:
+  output: release
+  buildResources: build
+# Everything is bundled by esbuild/Vite into dist/, so no node_modules are shipped.
+files:
+  - dist/**/*
+  - "!dist/**/*.map"
+  - package.json
+# The OpenCode runtime for this os/arch (vendor/opencode/<os>-<arch>, see scripts/fetch-opencode.mjs).
+extraResources:
+  - from: vendor/opencode/${os}-${arch}/opencode
+    to: opencode/opencode
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Sign the bundled runtime with the app's identity and entitlements (it needs JIT).
+  binaries:
+    - Contents/Resources/opencode/opencode
+  # Signing uses CSC_LINK/CSC_KEY_PASSWORD (or a keychain identity). Notarization runs automatically
+  # when APPLE_API_KEY/APPLE_API_KEY_ID/APPLE_API_ISSUER or APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID
+  # are set. See docs/architecture.md#distribution.
+
+dmg:
+  writeUpdateInfo: false
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+  executableName: peer
+  synopsis: AI coding that makes developers better, not just faster.
+  maintainer: Peer Team <noreply@example.com>
+
+deb:
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+    - git

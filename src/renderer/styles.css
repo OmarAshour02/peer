@@ -1,0 +1,115 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0d1117;
+  --color-panel: #11161d;
+  --color-raised: #161b22;
+  --color-line: #262c36;
+  --color-fg: #e6edf3;
+  --color-muted: #8b949e;
+  --color-faint: #6e7681;
+  --color-accent: #58a6ff;
+  --color-focus: #3fb950;
+  --color-collab: #58a6ff;
+  --color-learn: #d2a8ff;
+  --color-warn: #d29922;
+  --color-danger: #f85149;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.markdown p {
+  margin: 0.4em 0;
+  line-height: 1.6;
+}
+.markdown ul,
+.markdown ol {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+.markdown ul {
+  list-style: disc;
+}
+.markdown ol {
+  list-style: decimal;
+}
+.markdown li {
+  margin: 0.15em 0;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  font-weight: 600;
+  margin: 0.8em 0 0.3em;
+}
+.markdown h1 {
+  font-size: 1.25em;
+}
+.markdown h2 {
+  font-size: 1.12em;
+}
+.markdown code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--color-raised);
+  border: 1px solid var(--color-line);
+  border-radius: 4px;
+  padding: 0.05em 0.3em;
+}
+.markdown pre {
+  background: var(--color-panel);
+  border: 1px solid var(--color-line);
+  border-radius: 6px;
+  padding: 0.7em 0.9em;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.markdown pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+.markdown a {
+  color: var(--color-accent);
+}
+.markdown table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+}
+.markdown th,
+.markdown td {
+  border: 1px solid var(--color-line);
+  padding: 0.25em 0.6em;
+}
+.markdown blockquote {
+  border-left: 3px solid var(--color-line);
+  padding-left: 0.8em;
+  color: var(--color-muted);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 5px;
+  border: 2px solid var(--color-bg);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

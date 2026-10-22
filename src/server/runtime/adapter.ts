@@ -1,0 +1,95 @@
+import type {
+  FileDiff,
+  GateKind,
+  ModelRef,
+  ModelsResponse,
+  PeerMessage,
+  PeerMessageInfo,
+  PeerPart,
+  PermissionReply,
+  PermissionRequest,
+  RuntimeKind,
+  RuntimeStatus,
+  SessionRunStatus,
+} from "../../shared/types.js";
+
+/**
+ * The boundary between Peer and the coding-agent runtime. The collaboration engine and the
+ * HTTP API depend only on this interface, so the runtime (OpenCode today) can be replaced
+ * or extended without touching collaboration logic or the UI.
+ *
+ * All session ids here are runtime session ids; Peer maps them to its own sessions.
+ */
+export interface AgentRuntimeAdapter {
+  readonly kind: RuntimeKind;
+  /** Display name, e.g. "Claude Code". */
+  readonly name: string;
+  /** Name under which the model sees Peer's checkpoint tool in this runtime. */
+  readonly checkpointTool: string;
+
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  restart(): Promise<void>;
+  status(): RuntimeStatus;
+
+  listModels(directory: string): Promise<ModelsResponse>;
+
+  createSession(directory: string, input: { title?: string }): Promise<{ id: string; title: string }>;
+  getMessages(directory: string, sessionId: string): Promise<PeerMessage[]>;
+  getDiff(directory: string, sessionId: string): Promise<FileDiff[]>;
+  /** Parent session id for subagent sessions, or null for root sessions. */
+  getParentSessionId(directory: string, sessionId: string): Promise<string | null>;
+
+  /** Start an agent turn. Resolves once the runtime accepted it; progress arrives as events. */
+  prompt(directory: string, sessionId: string, input: PromptInput): Promise<void>;
+  abort(directory: string, sessionId: string): Promise<void>;
+
+  listPermissions(directory: string): Promise<PermissionRequest[]>;
+  replyPermission(directory: string, requestId: string, reply: PermissionReply): Promise<void>;
+
+  /** Ids of tools the runtime exposes for a model (used by health checks). */
+  listToolIds(directory: string, model: ModelRef): Promise<string[]>;
+
+  onEvent(listener: (event: RuntimeEvent) => void): () => void;
+}
+
+/**
+ * Collaboration hooks for runtimes Peer drives in-process (Claude Code, Codex). The OpenCode
+ * plugin reaches the same engine functions over the authenticated HTTP bridge instead.
+ */
+export interface RuntimeHooks {
+  /** Decide whether a tool call may run under the session's collaboration gate. */
+  checkTool(runtimeSessionId: string, tool: string, args: unknown): Promise<{ allow: true } | { allow: false; reason: string }>;
+  /**
+   * Open a checkpoint and wait for the developer's response. Resolves with the text to return to
+   * the agent; rejects if the checkpoint was cancelled or the signal aborted.
+   */
+  checkpoint(runtimeSessionId: string, callId: string | null, request: Record<string, unknown>, signal: AbortSignal): Promise<string>;
+}
+
+export interface PromptInput {
+  text: string;
+  /** Collaboration policy instructions for this turn. */
+  system: string;
+  /** How code changes are gated at the start of this turn (runtimes may enforce it natively too). */
+  gate: GateKind;
+  model?: ModelRef | null;
+  /** Tools to enable/disable for this turn. */
+  tools?: Record<string, boolean>;
+}
+
+/** Runtime events, already normalized into Peer shapes. */
+export type RuntimeEvent =
+  | { type: "runtime.status"; status: RuntimeStatus }
+  /** The runtime process came back after a crash; all in-flight runs are gone. */
+  | { type: "runtime.restarted" }
+  | { type: "session.updated"; sessionId: string; title: string; parentId: string | null }
+  | { type: "session.status"; sessionId: string; status: SessionRunStatus; message?: string }
+  | { type: "session.idle"; sessionId: string }
+  | { type: "session.error"; sessionId: string; error: string }
+  | { type: "session.diff"; sessionId: string; diff: FileDiff[] }
+  | { type: "message.updated"; sessionId: string; message: PeerMessageInfo }
+  | { type: "part.updated"; sessionId: string; messageId: string; part: PeerPart }
+  | { type: "part.delta"; sessionId: string; messageId: string; partId: string; field: string; delta: string }
+  | { type: "permission.asked"; request: PermissionRequest }
+  | { type: "permission.replied"; sessionId: string; requestId: string };

@@ -1,0 +1,86 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "verdict_rationale", "findings", "tests_executed", "claims_checked", "collaboration_checks", "prior_findings_review", "coverage_assessment", "unverified_assumptions"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["PASS", "FAIL", "NEEDS_MANUAL_REVIEW"] },
+    "verdict_rationale": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "category", "title", "file", "line", "description", "evidence", "reproduction", "confidence", "suggested_fix"],
+        "properties": {
+          "id": { "type": "string", "description": "Stable id like F1, F2. In a re-review, new findings continue the numbering." },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+          "category": { "type": "string", "enum": ["correctness", "collaboration", "security", "architecture", "regression", "error-handling", "tests", "performance", "docs"] },
+          "title": { "type": "string" },
+          "file": { "type": ["string", "null"], "description": "Repository-relative path." },
+          "line": { "type": ["integer", "null"] },
+          "description": { "type": "string" },
+          "evidence": { "type": "string", "description": "What you observed: code quoted with file:line, command output, a failing probe." },
+          "reproduction": { "type": ["string", "null"], "description": "Exact steps or command that shows the problem." },
+          "confidence": { "type": "string", "enum": ["confirmed", "likely", "possible"] },
+          "suggested_fix": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "tests_executed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "purpose", "exit_code", "result"],
+        "properties": {
+          "command": { "type": "string", "description": "The exact command line you ran." },
+          "purpose": { "type": "string" },
+          "exit_code": { "type": ["integer", "null"] },
+          "result": { "type": "string" }
+        }
+      }
+    },
+    "claims_checked": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "status", "evidence"],
+        "properties": {
+          "claim": { "type": "string" },
+          "status": { "type": "string", "enum": ["confirmed", "refuted", "unverified"] },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+    "collaboration_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["question", "status", "evidence"],
+        "properties": {
+          "question": { "type": "string" },
+          "status": { "type": "string", "enum": ["holds", "violated", "not_applicable", "unverified"] },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+    "prior_findings_review": {
+      "type": "array",
+      "description": "Re-reviews only: one entry per finding from the previous round. Empty on a first review.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "evidence"],
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "type": "string", "enum": ["resolved", "not_resolved", "rejection_accepted", "rejection_disputed"] },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+    "coverage_assessment": { "type": "string", "description": "Do the tests meaningfully exercise the changed behavior? Name the gaps." },
+    "unverified_assumptions": { "type": "array", "items": { "type": "string" } }
+  }
+}

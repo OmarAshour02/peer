@@ -1,0 +1,68 @@
+{
+  "name": "peer",
+  "productName": "Peer",
+  "version": "0.1.0",
+  "description": "AI coding that makes developers better, not just faster.",
+  "private": true,
+  "type": "module",
+  "main": "dist/electron/main.cjs",
+  "author": {
+    "name": "Peer Team"
+  },
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "fetch:opencode": "node scripts/fetch-opencode.mjs",
+    "build:main": "node scripts/build.mjs",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer",
+    "dev": "node scripts/dev.mjs",
+    "server": "npm run build:main && node dist/server/main.js",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:modes": "node scripts/verify-modes.mjs",
+    "validate:collab": "node scripts/validate-collaboration.mjs",
+    "verify:peer": "node scripts/verify/verify-peer.mjs",
+    "eval:integration": "node scripts/verify/eval-integration.mjs",
+    "smoke": "electron . --smoke-test",
+    "check": "npm run typecheck && npm run test && npm run build",
+    "dist": "npm run build && electron-builder --publish never",
+    "dist:mac": "npm run build && electron-builder --mac --publish never",
+    "dist:linux": "npm run build && electron-builder --linux --publish never",
+    "smoke:packaged": "node scripts/smoke-packaged.mjs",
+    "postinstall": "node scripts/fetch-opencode.mjs"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.308",
+    "@hono/node-server": "2.1.5",
+    "@opencode-ai/plugin": "1.19.3",
+    "@opencode-ai/sdk": "1.19.3",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "electron": "44.9.3",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "hono": "4.13.13",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "vite": "8.3.5",
+    "vitest": "5.0.5",
+    "zod": "4.1.8",
+    "zustand": "5.0.16"
+  },
+  "opencode": {
+    "version": "1.19.3"
+  },
+  "homepage": "https://github.com/peer-dev/peer"
+}
