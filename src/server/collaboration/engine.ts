@@ -54,6 +54,9 @@ const EMPTY_INTENT_TEXT: Record<TurnIntent, string> = {
   answer: "Please give me the direct answer.",
 };
 
+/** Sent for the developer when Peer continues engaged work in a writable turn (sandboxFixedPerTurn). */
+export const CONTINUATION_TEXT = "Code changes are now unlocked. Continue the task from where you stopped and implement what we agreed.";
+
 /**
  * Decides how the developer and the agent work together on each turn:
  * which policy applies, whether code changes are gated, which questions reach the developer,
@@ -70,6 +73,10 @@ export class CollaborationEngine {
   private readonly runStatus = new Map<string, SessionRunStatus>();
   /** Child (subagent) runtime session id -> root runtime session id. */
   private readonly parentCache = new Map<string, string | null>();
+  /** Turns that were stopped or failed. They never continue on their own. */
+  private readonly stoppedTurns = new Set<string>();
+  /** Session id -> turn whose continuation is scheduled. Stop cancels it. */
+  private readonly pendingContinuations = new Map<string, string>();
 
   constructor(
     private readonly store: Store,
@@ -117,11 +124,18 @@ export class CollaborationEngine {
       const session = this.store.getSessionByRuntimeId(event.sessionId);
       if (session) this.runStatus.set(session.id, event.status);
     }
+    if (event.type === "session.error") {
+      const session = this.store.getSessionByRuntimeId(event.sessionId);
+      const turn = session ? this.store.latestTurn(session.id) : null;
+      if (turn && turn.endedAt === null) this.stoppedTurns.add(turn.id);
+    }
     if (event.type === "session.idle") {
       const session = this.store.getSessionByRuntimeId(event.sessionId);
       if (!session) return;
+      const ended = this.store.latestTurn(session.id);
       this.runStatus.set(session.id, "idle");
       this.finishActiveTurn(session.id);
+      if (ended && ended.endedAt === null) this.continueUnlockedTurn(session.id, ended.id);
     }
     if (event.type === "session.updated" && event.parentId) {
       this.parentCache.set(event.sessionId, event.parentId);
@@ -165,11 +179,39 @@ export class CollaborationEngine {
     return { kind: "turn-started", turn };
   }
 
-  private async startTurn(session: PeerSession, text: string, intent: TurnIntent, isResume: boolean): Promise<Turn> {
+  /**
+   * A runtime whose sandbox is fixed per turn (Codex) keeps a turn that started gated read-only
+   * even after the developer engaged in it. When such a turn ends normally, continue the same
+   * task in a new turn, which starts with the gate open and therefore with write access.
+   */
+  private continueUnlockedTurn(sessionId: string, turnId: string) {
+    const session = this.store.getSession(sessionId);
+    const turn = this.store.getTurn(turnId);
+    if (!session || !turn || this.stoppedTurns.delete(turnId)) return;
+    if (turn.gate === "open" || turn.engagedAt === null) return;
+    if (!this.runtimes.has(session.runtime) || !this.runtimes.get(session.runtime).sandboxFixedPerTurn) return;
+    // Start after the idle event has reached subscribers, so the UI sees idle, then busy. If the
+    // developer started a turn in between, their message takes over; if they pressed Stop, nothing runs.
+    this.pendingContinuations.set(sessionId, turnId);
+    setImmediate(() => {
+      if (this.pendingContinuations.get(sessionId) !== turnId) return;
+      this.pendingContinuations.delete(sessionId);
+      if (this.store.latestTurn(sessionId)?.id !== turnId || this.statusOf(sessionId) !== "idle") return;
+      const current = this.store.getSession(sessionId);
+      if (!current) return;
+      this.store.logEvent(sessionId, "turn.continued", { fromTurnId: turnId });
+      this.startTurn(current, CONTINUATION_TEXT, "default", false, true).catch((err) => {
+        this.store.logEvent(sessionId, "turn.continue_failed", { fromTurnId: turnId, error: err instanceof Error ? err.message : String(err) });
+      });
+    });
+  }
+
+  private async startTurn(session: PeerSession, text: string, intent: TurnIntent, isResume: boolean, isContinuation = false): Promise<Turn> {
     this.finishActiveTurn(session.id);
     const previous = this.store.latestTurn(session.id);
-    // A developer reply after a gated turn in which they did not engage is the engagement.
-    const awaitingEngagement = isResume || (previous !== null && previous.gate !== "open" && previous.engagedAt === null);
+    // A developer reply after a gated turn in which they did not engage is the engagement. A
+    // continuation carries on work the developer already engaged with.
+    const awaitingEngagement = isResume || isContinuation || (previous !== null && previous.gate !== "open" && previous.engagedAt === null);
     const plan = resolveEffectivePolicy(session.mode, intent, awaitingEngagement);
     const turn = this.store.createTurn({ sessionId: session.id, mode: session.mode, intent, gate: plan.gate });
     this.store.logEvent(session.id, "turn.started", {
@@ -178,6 +220,7 @@ export class CollaborationEngine {
       intent,
       gate: plan.gate,
       resume: isResume,
+      continuation: isContinuation,
       text,
     });
 
@@ -207,6 +250,9 @@ export class CollaborationEngine {
 
   async abort(sessionId: string) {
     const session = this.requireSession(sessionId);
+    this.pendingContinuations.delete(sessionId);
+    const turn = this.store.latestTurn(sessionId);
+    if (turn && turn.endedAt === null) this.stoppedTurns.add(turn.id);
     for (const cp of this.store.listCheckpoints(sessionId)) {
       if (cp.status === "pending") this.cancelCheckpoint(cp.id, "Stopped by the developer");
     }
@@ -446,7 +492,14 @@ export class CollaborationEngine {
     const r = cp.resolution;
     const rec = cp.recommendation ? ` (you recommended "${cp.recommendation}")` : "";
     const turn = cp.turnId ? this.store.getTurn(cp.turnId) : null;
-    const unlocked = turn && turn.gate !== "open" && turn.engagedAt !== null ? " Code changes are now unlocked." : "";
+    const session = this.store.getSession(cp.sessionId);
+    const fixedSandbox = session !== null && this.runtimes.has(session.runtime) && this.runtimes.get(session.runtime).sandboxFixedPerTurn === true;
+    const unlocked =
+      turn && turn.gate !== "open" && turn.engagedAt !== null
+        ? fixedSandbox
+          ? " Code changes are now unlocked, but this turn's sandbox stays read-only: do not try to edit files now. Say in one or two sentences what you will do, then end your turn. Peer starts a new turn with write access right away."
+          : " Code changes are now unlocked."
+        : "";
     if (!r) return "The checkpoint has no response yet.";
     switch (r.action) {
       case "policy":
@@ -461,7 +514,6 @@ export class CollaborationEngine {
         return `The developer chose to skip this discussion and wants you to proceed with the implementation${r.text ? ` (note: "${r.text}")` : ""}. Use your recommended approach and briefly explain the key idea as you go.${unlocked}`;
       case "hint": {
         const n = this.hintNumber(cp);
-        const session = this.store.getSession(cp.sessionId);
         const tool = session ? this.checkpointToolFor(session) : "the checkpoint tool";
         return `The developer asked for a hint (hint ${n}${r.text ? `; they added: "${r.text}"` : ""}). Reply with one short hint that moves them one step closer without revealing the full answer, then ask again with ${tool} (category "hypothesis" or "concept").`;
       }

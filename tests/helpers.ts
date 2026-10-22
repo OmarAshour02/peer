@@ -5,6 +5,8 @@ import type { AgentRuntimeAdapter, PromptInput, RuntimeEvent } from "../src/serv
 export class FakeRuntime implements AgentRuntimeAdapter {
   readonly name: string;
   readonly checkpointTool: string;
+  /** Set to behave like Codex, whose sandbox is fixed for the whole turn. */
+  sandboxFixedPerTurn = false;
   prompts: { directory: string; sessionId: string; input: PromptInput }[] = [];
   aborted: string[] = [];
   parents = new Map<string, string>();

@@ -26,6 +26,11 @@ export interface AgentRuntimeAdapter {
   readonly name: string;
   /** Name under which the model sees Peer's checkpoint tool in this runtime. */
   readonly checkpointTool: string;
+  /**
+   * The runtime's OS sandbox is fixed when a turn starts (Codex). A turn that starts gated stays
+   * read-only even after the developer engages, so Peer continues the work in a new turn.
+   */
+  readonly sandboxFixedPerTurn?: boolean;
 
   start(): Promise<void>;
   stop(): Promise<void>;

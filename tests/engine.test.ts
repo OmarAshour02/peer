@@ -7,6 +7,7 @@ import { RuntimeSet } from "../src/server/runtime/set.js";
 import { PeerService } from "../src/server/service.js";
 import { Store } from "../src/server/store.js";
 import type { PeerEvent, PeerSession } from "../src/shared/types.js";
+import { CONTINUATION_TEXT } from "../src/server/collaboration/engine.js";
 import { FakeRuntime } from "./helpers.js";
 
 let dir: string;
@@ -307,5 +308,105 @@ describe("permissions", () => {
     await service.abort(s.id);
     expect(service.snapshot(s.id).permissions).toEqual([]);
     expect(events.some((e) => e.type === "permission.replied" && e.requestId === "perm_1")).toBe(true);
+  });
+});
+
+describe("runtimes whose sandbox is fixed per turn (Codex)", () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  /** A Learn turn: gated at the start, then the developer engages through a checkpoint. */
+  async function engagedLearnTurn(action: "answer" | "hint" = "answer") {
+    const s = await newSession("learn");
+    await service.send(s.id, "add ETag support");
+    expect(runtime.lastPrompt().input.gate).toBe("engage");
+    const { checkpoint } = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "hypothesis", question: "What should the ETag be based on?" });
+    const resolved = await engine().resolveCheckpoint(checkpoint!.id, action === "answer" ? { action, text: "A hash of the list" } : { action });
+    return { s, resolved };
+  }
+
+  it("continues engaged work in a new turn that starts with write access", async () => {
+    runtime.sandboxFixedPerTurn = true;
+    const { s, resolved } = await engagedLearnTurn();
+    // The read-only turn is told not to attempt edits and to hand over.
+    expect(engine().agentOutput(resolved)).toMatch(/sandbox stays read-only.*end your turn/);
+    expect(runtime.prompts).toHaveLength(1);
+
+    idle(s);
+    await flush();
+    expect(runtime.prompts).toHaveLength(2);
+    expect(runtime.lastPrompt().input).toMatchObject({ text: CONTINUATION_TEXT, gate: "open" });
+    expect(runtime.prompts[1]!.sessionId).toBe(runtime.prompts[0]!.sessionId);
+    expect(engine().gateFor(s.id).locked).toBe(false);
+    expect(store.listEvents(s.id).some((e) => e.type === "turn.continued")).toBe(true);
+
+    // The continuation itself starts open, so it never continues again.
+    idle(s);
+    await flush();
+    expect(runtime.prompts).toHaveLength(2);
+  });
+
+  it("reports idle before the continuation's busy, so the UI ends up busy", async () => {
+    runtime.sandboxFixedPerTurn = true;
+    const { s } = await engagedLearnTurn();
+    events.length = 0;
+    idle(s);
+    await flush();
+    const statuses = events.flatMap((e) => (e.type === "session.status" && e.sessionId === s.id ? [e.status] : []));
+    expect(statuses.at(-2)).toBe("idle");
+    expect(statuses.at(-1)).toBe("busy");
+  });
+
+  it("Stop between the end of the turn and the continuation cancels it", async () => {
+    runtime.sandboxFixedPerTurn = true;
+    const { s } = await engagedLearnTurn();
+    idle(s);
+    await engine().abort(s.id);
+    await flush();
+    expect(runtime.prompts).toHaveLength(1);
+    expect(store.listEvents(s.id).some((e) => e.type === "turn.continued")).toBe(false);
+  });
+
+  it("lets a developer message that arrives first take over", async () => {
+    runtime.sandboxFixedPerTurn = true;
+    const { s } = await engagedLearnTurn();
+    idle(s);
+    await service.send(s.id, "actually, let's use a revision counter");
+    await flush();
+    expect(runtime.prompts.map((p) => p.input.text)).toEqual(["add ETag support", "actually, let's use a revision counter"]);
+  });
+
+  it("does not continue when the developer did not engage", async () => {
+    runtime.sandboxFixedPerTurn = true;
+    const { s } = await engagedLearnTurn("hint");
+    idle(s);
+    await flush();
+    expect(runtime.prompts).toHaveLength(1);
+    // The next developer message is still the engagement, as before.
+    await service.send(s.id, "my guess: hash it");
+    expect(runtime.lastPrompt().input.gate).toBe("open");
+  });
+
+  it("does not continue a turn that was stopped or failed", async () => {
+    runtime.sandboxFixedPerTurn = true;
+    const stopped = await engagedLearnTurn();
+    await engine().abort(stopped.s.id);
+    idle(stopped.s);
+    await flush();
+    expect(runtime.prompts).toHaveLength(1);
+
+    const failed = await engagedLearnTurn();
+    runtime.emit({ type: "session.error", sessionId: failed.s.runtimeSessionId, error: "model unavailable" });
+    idle(failed.s);
+    await flush();
+    expect(runtime.prompts.filter((p) => p.sessionId === failed.s.runtimeSessionId)).toHaveLength(1);
+  });
+
+  it("leaves other runtimes unchanged: they unlock within the same turn", async () => {
+    const { s, resolved } = await engagedLearnTurn();
+    expect(engine().agentOutput(resolved)).toMatch(/Code changes are now unlocked\.$/);
+    expect((await write(s)).allow).toBe(true);
+    idle(s);
+    await flush();
+    expect(runtime.prompts).toHaveLength(1);
   });
 });

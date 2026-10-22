@@ -6,6 +6,7 @@ import { isDestructiveCommand, unwrapShell } from "../src/server/collaboration/s
 import { EventHub } from "../src/server/hub.js";
 import { peerToolInput, peerToolName, toolResultDiff } from "../src/server/runtime/claude/normalize.js";
 import { normalizeItem } from "../src/server/runtime/codex/normalize.js";
+import { CodexAdapter, turnStartParams } from "../src/server/runtime/codex/adapter.js";
 import { RuntimeSet } from "../src/server/runtime/set.js";
 import { Transcript } from "../src/server/runtime/transcript.js";
 import { PeerService } from "../src/server/service.js";
@@ -170,5 +171,28 @@ describe("multiple runtimes", () => {
     const second = service.engine.runCheckpoint(s.runtimeSessionId, null, { category: "risk", question: "Sure?" }, abort.signal);
     abort.abort();
     await expect(second).rejects.toThrow(/cancelled/);
+  });
+});
+
+describe("Codex turn/start", () => {
+  const input = (gate: "open" | "engage" | "hold") => ({ text: "do it", system: "POLICY", gate });
+
+  it("runs gated turns read-only and open turns workspace-write, never with network", () => {
+    for (const gate of ["engage", "hold"] as const) expect(turnStartParams("t", input(gate), "m").sandboxPolicy).toEqual({ type: "readOnly", networkAccess: false });
+    expect(turnStartParams("t", input("open"), "m").sandboxPolicy).toMatchObject({ type: "workspaceWrite", networkAccess: false });
+    expect(turnStartParams("t", input("open"), "m")).toMatchObject({ threadId: "t", approvalPolicy: "untrusted", model: "m" });
+  });
+
+  it("sends the collaboration policy with sandbox guidance on every turn", () => {
+    const policy = turnStartParams("t", input("open"), "m").input[0]!.text;
+    expect(policy).toContain("POLICY");
+    expect(policy).toMatch(/listen EPERM/);
+    expect(policy).toMatch(/rerun it with escalated permissions/);
+    expect(policy).toMatch(/Do not report work as tested/);
+    expect(turnStartParams("t", input("open"), "m").input[1]!.text).toBe("do it");
+  });
+
+  it("declares that its sandbox is fixed per turn", () => {
+    expect(new CodexAdapter({} as ConstructorParameters<typeof CodexAdapter>[0]).sandboxFixedPerTurn).toBe(true);
   });
 });

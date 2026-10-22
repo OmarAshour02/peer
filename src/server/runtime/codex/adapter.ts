@@ -14,6 +14,33 @@ import { CodexRpc, type RpcNotification, type RpcRequest } from "./rpc.js";
 /** The Codex CLI version this integration was built and tested against. */
 export const CODEX_TESTED_VERSION = "0.163.0";
 
+// Codex's sandbox has no network, which also blocks tests that open a local port. Rerunning with
+// escalated permissions turns that into an approval request, which Peer sends to the developer.
+const SANDBOX_NOTE =
+  "Sandbox: your commands run without network access, which also blocks opening local ports (tests that start a server fail with errors like `listen EPERM`). " +
+  "When a command fails only because of the sandbox, rerun it with escalated permissions and a one-line justification; Peer asks the developer. Do not report work as tested if its tests could not run.";
+
+/**
+ * `turn/start` parameters. Codex fixes the sandbox for the whole turn: read-only when the turn
+ * starts gated, workspace-write otherwise, never with network access.
+ */
+export function turnStartParams(threadId: string, input: PromptInput, model: string | undefined) {
+  return {
+    threadId,
+    // developerInstructions are fixed per thread, so the per-turn policy travels with the input.
+    input: [
+      { type: "text", text: `<peer_collaboration_policy>\n${input.system}\n\n${SANDBOX_NOTE}\n</peer_collaboration_policy>`, text_elements: [] },
+      { type: "text", text: input.text, text_elements: [] },
+    ],
+    approvalPolicy: "untrusted",
+    sandboxPolicy:
+      input.gate === "open"
+        ? { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
+        : { type: "readOnly", networkAccess: false },
+    model,
+  };
+}
+
 const MAX_RESTARTS = 5;
 const RESTART_WINDOW_MS = 2 * 60_000;
 
@@ -100,12 +127,15 @@ interface Run {
  * that Codex doesn't consider safe/read-only comes to Peer for approval. Peer declines it while
  * the collaboration gate is locked, routes destructive or sandbox-escaping requests to the
  * developer, and accepts the rest. Turns that start gated also run in Codex's read-only sandbox,
- * so the OS blocks writes even if an approval were missed. Checkpoints are a dynamic tool.
+ * so the OS blocks writes even if an approval were missed. That sandbox is fixed for the turn, so
+ * when the developer engages mid-turn the engine continues in a new, writable turn
+ * (sandboxFixedPerTurn). Checkpoints are a dynamic tool.
  */
 export class CodexAdapter implements AgentRuntimeAdapter {
   readonly kind = "codex" as const;
   readonly name = "Codex";
   readonly checkpointTool = CHECKPOINT_TOOL;
+  readonly sandboxFixedPerTurn = true;
 
   private binary: string | null = null;
   private rpc: CodexRpc | null = null;
@@ -357,20 +387,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
     transcript.startAssistantMessage(run.messageId, { providerId: "codex", modelId: model });
     this.emit({ type: "session.status", sessionId, status: "busy" });
     try {
-      const res = await this.client().call<{ turn: { id: string } }>("turn/start", {
-        threadId,
-        // developerInstructions are fixed per thread, so the per-turn policy travels with the input.
-        input: [
-          { type: "text", text: `<peer_collaboration_policy>\n${input.system}\n</peer_collaboration_policy>`, text_elements: [] },
-          { type: "text", text: input.text, text_elements: [] },
-        ],
-        approvalPolicy: "untrusted",
-        sandboxPolicy:
-          input.gate === "open"
-            ? { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
-            : { type: "readOnly", networkAccess: false },
-        model,
-      });
+      const res = await this.client().call<{ turn: { id: string } }>("turn/start", turnStartParams(threadId, input, model));
       run.turnId ??= res.turn.id;
     } catch (err) {
       this.endRun(run, err instanceof Error ? err.message : String(err), true);

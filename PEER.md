@@ -51,7 +51,7 @@ Peer is explicit about this distinction.
 
 | | OpenCode (bundled) | Claude Code | Codex |
 |---|---|---|---|
-| Gate on tool calls | Peer plugin, `tool.execute.before` | Peer `PreToolUse` hook (subagents included) | Peer is Codex's approver (approval policy `untrusted`): commands and file changes it doesn't consider safe come to Peer, which declines them while the gate is locked. Turns that start gated also run in Codex's **read-only sandbox**, so the OS blocks writes too |
+| Gate on tool calls | Peer plugin, `tool.execute.before` | Peer `PreToolUse` hook (subagents included) | Peer is Codex's approver (approval policy `untrusted`): commands and file changes it doesn't consider safe come to Peer, which declines them while the gate is locked. Turns that start gated also run in Codex's **read-only sandbox**, so the OS blocks writes too. Codex fixes the sandbox for a whole turn, so when you engage mid-turn Peer ends that turn and continues the work in a new turn with write access |
 | Checkpoints | plugin tool `peer_checkpoint` | in-process MCP tool `mcp__peer__checkpoint` | client-side ("dynamic") tool `peer_checkpoint` |
 | Destructive commands | OpenCode permission rules (ask) | hook forces an approval → Peer permission card | Peer sends them to the developer as a permission card |
 | Other approvals | OpenCode's own rules | Claude Code's own permission rules and modes (edits inside the workspace are pre-approved, like in the other runtimes); its prompts become Peer permission cards | Peer approves plain in-workspace commands and edits; network access, sandbox escalation, writes outside the workspace and permission requests go to the developer |
@@ -62,6 +62,7 @@ Known gaps:
 - **Codex MCP tools** (from your `~/.codex` config) run without asking Codex's client, so Peer cannot block one beforehand. If one that isn't marked read-only starts while code changes are locked, Peer stops the turn and says why. That is detection after the fact, not prevention. On OpenCode and Claude Code, MCP tools go through the gate like any other tool.
 - Hooks from your own Claude Code settings run as you configured them.
 - Codex's dynamic tools (used for checkpoints) are part of its experimental app-server API.
+- **Codex's sandbox has no network**, which also blocks tests that open a local port (`listen EPERM`). Peer tells Codex to rerun such tests with escalated permissions, which reach you as a permission card. That is guidance: a model can skip the tests instead, and small models sometimes do. Codex's experimental network proxy can allow local binding, but Peer does not depend on it.
 
 **Guidance** (per-turn instructions the agent receives; good models follow them, but nothing forces them):
 - Whether Collaborate actually proposes an approach before a significant change (the gate is open in Collaborate).
