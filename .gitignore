@@ -6,3 +6,10 @@ vendor/
 .peer-dev/
 *.log
 .DS_Store
+
+# Local agent workflow notes (kept out of the repo)
+/README.md
+/CLAUDE.md
+/.claude/
+/docs/verification.md
+/docs/agdr/
