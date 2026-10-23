@@ -119,6 +119,7 @@ function Message({ message, checkpoints, mode }: { message: PeerMessage; checkpo
         <div className="my-2 rounded-md border border-danger/60 bg-danger/10 px-3 py-2 text-[13px] text-danger">{message.error}</div>
       )}
       {message.error === "Stopped." && <div className="my-2 text-[12px] text-faint">Stopped.</div>}
+      {message.warning && <div className="my-2 rounded-md border border-warn/60 bg-warn/10 px-3 py-2 text-[13px] text-warn">{message.warning}</div>}
     </div>
   );
 }

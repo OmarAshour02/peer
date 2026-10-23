@@ -6,9 +6,9 @@ import { CHECKPOINT_TOOL } from "../../collaboration/prompt.js";
 import { isDestructiveCommand, unwrapShell } from "../../collaboration/safety.js";
 import type { AgentRuntimeAdapter, PromptInput, RuntimeEvent, RuntimeHooks } from "../adapter.js";
 import { findExecutable, runCli } from "../cli.js";
-import { diffSinceSnapshot, snapshotWorkspace } from "../git-snapshot.js";
+import { changedFiles, diffSinceSnapshot, snapshotWorkspace } from "../git-snapshot.js";
 import { Transcript, titleFromPrompt, type RuntimeStorage } from "../transcript.js";
-import { normalizeItem, type CodexItem } from "./normalize.js";
+import { isDocFile, isTestCommand, normalizeItem, TestEvidence, UNTESTED_CHANGE_WARNING, type CodexItem } from "./normalize.js";
 import { CodexRpc, type RpcNotification, type RpcRequest } from "./rpc.js";
 
 /** The Codex CLI version this integration was built and tested against. */
@@ -117,6 +117,16 @@ interface Run {
   filePaths: Map<string, string[]>;
   /** Items Peer declined, with the reason (Codex itself only reports "declined"). */
   declined: Map<string, string>;
+  /** Sandbox-blocked commands and untested changes, for the turn's "Not verified" warning. */
+  testEvidence: TestEvidence;
+  /** Workspace snapshots, taken one at a time (they share the session's index file). */
+  snapshots: Promise<unknown>;
+  /** The workspace when the turn started. */
+  startTree: string | null;
+  /** Test command item -> the workspace just before Peer let it run. */
+  preTestTrees: Map<string, string | null>;
+  /** The workspace the last test run that reached its tests ran against; undefined before one. */
+  testedTree?: string | null;
 }
 
 /**
@@ -226,7 +236,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
 
   async stop(): Promise<void> {
     this.stopped = true;
-    for (const run of this.runs.values()) this.endRun(run, "Peer is shutting down");
+    for (const run of this.runs.values()) this.endRun(run, "Peer is shutting down", false, false);
     this.rpc?.kill();
     this.rpc = null;
     this.setStatus({ state: "stopped" });
@@ -241,7 +251,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
   private async onExit(rpc: CodexRpc, code: number | null, signal: NodeJS.Signals | null) {
     if (rpc !== this.rpc || this.stopped) return;
     this.rpc = null;
-    for (const run of this.runs.values()) this.endRun(run, "Codex exited unexpectedly");
+    for (const run of this.runs.values()) this.endRun(run, "Codex exited unexpectedly", false, false);
     const message = `Codex app-server exited unexpectedly (code ${code}, signal ${signal}).`;
     this.opts.log(`[codex] ${message}`);
     const now = Date.now();
@@ -382,7 +392,13 @@ export class CodexAdapter implements AgentRuntimeAdapter {
       approvals: new Map(),
       filePaths: new Map(),
       declined: new Map(),
+      testEvidence: new TestEvidence(),
+      snapshots: Promise.resolve(),
+      startTree: null,
+      preTestTrees: new Map(),
     };
+    // Taken before the turn starts, so every change Codex makes comes after it.
+    run.startTree = await this.snapshot(run);
     this.runs.set(sessionId, run);
     transcript.startAssistantMessage(run.messageId, { providerId: "codex", modelId: model });
     this.emit({ type: "session.status", sessionId, status: "busy" });
@@ -416,6 +432,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
       const pending = run.approvals.get(requestId);
       if (!pending) continue;
       run.approvals.delete(requestId);
+      if (reply !== "reject") await this.beforeTestCommand(run, pending.method, pending.params);
       this.client().respond(pending.rpcId, approvalResponse(pending.method, pending.params, reply));
       this.emit({ type: "permission.replied", sessionId: run.sessionId, requestId });
       return;
@@ -433,16 +450,60 @@ export class CodexAdapter implements AgentRuntimeAdapter {
     run.approvals.clear();
   }
 
-  private endRun(run: Run, reason: string, isError = false) {
+  /**
+   * End a run. The turn is first checked for code changes made after its last test run, including
+   * changes made through shell commands, which Codex doesn't report as file changes; it reports
+   * idle once that check is done. Shutdown and crashes skip the check.
+   */
+  private endRun(run: Run, reason: string, isError = false, checkChanges = true) {
     if (this.runs.get(run.sessionId) !== run) return;
     this.runs.delete(run.sessionId);
     run.abort.abort();
     this.cancelApprovals(run);
-    const transcript = this.transcript(run.sessionId);
-    transcript.failRunningTools(run.messageId, reason);
-    transcript.completeMessage(run.messageId, isError ? reason : undefined);
-    if (isError) this.emit({ type: "session.error", sessionId: run.sessionId, error: reason });
-    this.emit({ type: "session.idle", sessionId: run.sessionId });
+    const finish = (warning: string | undefined) => {
+      const transcript = this.transcript(run.sessionId);
+      transcript.failRunningTools(run.messageId, reason);
+      transcript.completeMessage(run.messageId, isError ? reason : undefined, warning);
+      if (isError) this.emit({ type: "session.error", sessionId: run.sessionId, error: reason });
+      this.emit({ type: "session.idle", sessionId: run.sessionId });
+    };
+    const warning = run.testEvidence.warning();
+    if (warning || !checkChanges) return finish(warning);
+    this.changedSinceLastTest(run).then(
+      (changed) => finish(changed ? UNTESTED_CHANGE_WARNING : undefined),
+      (err) => {
+        this.opts.log(`[codex] change check failed: ${err instanceof Error ? err.message : String(err)}`);
+        finish(undefined);
+      },
+    );
+  }
+
+  private snapshot(run: Run): Promise<string | null> {
+    const next = run.snapshots.then(() => snapshotWorkspace(run.directory, this.indexFile(run.sessionId)));
+    run.snapshots = next.catch(() => null);
+    return next;
+  }
+
+  /**
+   * Before Peer lets a test command run, record the workspace it will test. Anything that changes
+   * from then on, including edits later in the same compound command, counts as untested.
+   */
+  private async beforeTestCommand(run: Run, method: string, params: Record<string, unknown>) {
+    if (method !== "item/commandExecution/requestApproval" || typeof params.itemId !== "string") return;
+    if (!isTestCommand(String(params.command ?? ""))) return;
+    run.preTestTrees.set(params.itemId, await this.snapshot(run));
+  }
+
+  /**
+   * Whether code (not docs) in the workspace changed after the last test run, or since the turn
+   * started. A test run counts only with a snapshot from before Peer let it run; Codex asks Peer
+   * before running test runners, so one is normally there, and without one the turn warns.
+   */
+  private async changedSinceLastTest(run: Run): Promise<boolean> {
+    const base = run.testedTree !== undefined ? run.testedTree : run.startTree;
+    const end = await this.snapshot(run);
+    if (!base || !end || base === end) return false;
+    return (await changedFiles(run.directory, base, end)).some((f) => !isDocFile(f));
   }
 
   private runForThread(threadId: unknown): Run | undefined {
@@ -477,6 +538,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
           run.filePaths.set(item.id, (item.changes as { path?: unknown }[]).map((c) => String(c.path ?? "")));
         }
         if (method === "item/started" && item.type === "mcpToolCall" && item.readOnlyHint !== true) void this.checkMcpCall(run, item);
+        if (method === "item/completed" && run.testEvidence.observe(item) && run.preTestTrees.has(item.id)) run.testedTree = run.preTestTrees.get(item.id);
         let part = normalizeItem(item, run.directory);
         const declined = run.declined.get(item.id);
         if (part?.type === "tool" && declined && item.status === "declined") part = { ...part, error: declined };
@@ -585,7 +647,10 @@ export class CodexAdapter implements AgentRuntimeAdapter {
       needsDeveloper = String(p.reason ?? "Additional permissions");
     }
 
-    if (!needsDeveloper) return rpc.respond(req.id, approvalResponse(req.method, p, "once"));
+    if (!needsDeveloper) {
+      await this.beforeTestCommand(run, req.method, p);
+      return rpc.respond(req.id, approvalResponse(req.method, p, "once"));
+    }
     const request: PermissionRequest = {
       id: `perm_${randomUUID()}`,
       sessionId: run.sessionId,

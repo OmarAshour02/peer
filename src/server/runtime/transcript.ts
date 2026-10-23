@@ -88,11 +88,12 @@ export class Transcript {
     this.emit({ type: "part.delta", sessionId: this.sessionId, messageId, partId, field: "text", delta });
   }
 
-  completeMessage(messageId: string, error?: string) {
+  completeMessage(messageId: string, error?: string, warning?: string) {
     const message = this.messages.get(messageId);
     if (!message || message.completedAt) return;
     message.completedAt = Date.now();
     if (error) message.error = error;
+    if (warning) message.warning = warning;
     this.save(message);
     this.emitInfo(message);
   }

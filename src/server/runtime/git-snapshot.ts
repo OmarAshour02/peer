@@ -69,3 +69,11 @@ export async function diffSinceSnapshot(dir: string, base: string, indexFile: st
   }
   return diffs;
 }
+
+/** Paths (relative to the repository root) that differ between two snapshots. */
+export async function changedFiles(dir: string, base: string, current: string): Promise<string[]> {
+  if (base === current) return [];
+  const top = (await git(dir, ["rev-parse", "--show-toplevel"])).trim();
+  // -z: unquoted names (git quotes non-ASCII paths otherwise), separated by NUL.
+  return (await git(top, ["diff-tree", "-r", "-z", "--no-renames", "--name-only", base, current])).split("\0").filter(Boolean);
+}

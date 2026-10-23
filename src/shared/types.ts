@@ -150,6 +150,8 @@ export interface PeerMessageInfo {
   createdAt: number;
   completedAt?: number;
   error?: string;
+  /** Something the developer should know about the turn that isn't an error (e.g. tests that could not run). */
+  warning?: string;
   providerId?: string;
   modelId?: string;
 }

@@ -255,6 +255,8 @@ async function run(name) {
     gateBlocks: events.filter((e) => e.type === "gate.blocked").length,
     // Peer continued engaged work in a new, writable turn (runtimes with a per-turn sandbox).
     continuations: events.filter((e) => e.type === "turn.continued").length,
+    // Turns Peer flagged because the sandbox blocked a command that was never rerun successfully.
+    sandboxWarnings: messages.filter((m) => m.warning).length,
     pause,
     toolCalls: toolParts(messages).filter((p) => !isCheckpointTool(p)).length,
     files,
@@ -265,7 +267,7 @@ async function run(name) {
   };
   const verdict = scenario.expectCheckpoint === asked.length > 0 ? "as expected" : "NOT as expected";
   console.log(
-    `  -> ${asked.length} checkpoint(s) (${verdict}), pause ${pause ? (pause.held ? "held" : "VIOLATED") : "n/a"}, ${result.gateBlocks} gate block(s), ${result.continuations} continuation(s), ${files.length} file(s), tests ${testsPass ? "pass" : "FAIL"}, ${result.seconds}s`,
+    `  -> ${asked.length} checkpoint(s) (${verdict}), pause ${pause ? (pause.held ? "held" : "VIOLATED") : "n/a"}, ${result.gateBlocks} gate block(s), ${result.continuations} continuation(s), ${result.sandboxWarnings} sandbox warning(s), ${files.length} file(s), tests ${testsPass ? "pass" : "FAIL"}, ${result.seconds}s`,
   );
   return result;
 }
