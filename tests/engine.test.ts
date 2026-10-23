@@ -401,6 +401,40 @@ describe("runtimes whose sandbox is fixed per turn (Codex)", () => {
     expect(runtime.prompts.filter((p) => p.sessionId === failed.s.runtimeSessionId)).toHaveLength(1);
   });
 
+  it("the continuation shares the task's checkpoint budget instead of getting a fresh one", async () => {
+    runtime.sandboxFixedPerTurn = true;
+    const { s } = await engagedLearnTurn(); // 1 of Learn's 4 used in the read-only turn
+    idle(s);
+    await flush();
+    expect(runtime.lastPrompt().input.system).toContain("At most 3 checkpoint(s) this turn");
+    const ask = (question: string, category: "tradeoff" | "risk" = "tradeoff") => engine().requestCheckpoint(s.runtimeSessionId, null, { category, question });
+    for (const q of ["A?", "B?", "C?"]) {
+      const { checkpoint } = await ask(q);
+      expect(checkpoint!.status, q).toBe("pending");
+      await engine().resolveCheckpoint(checkpoint!.id, { action: "answer", text: "ok" });
+    }
+    const fifth = await ask("D?");
+    expect(fifth.checkpoint!.status).toBe("auto_resolved");
+    expect(fifth.output).toMatch(/budget for this turn \(4\) is used up/);
+    // Risk questions stay exempt.
+    expect((await ask("Drop the table?", "risk")).checkpoint!.status).toBe("pending");
+  });
+
+  it("records which turn a continuation carries on, and the next developer message starts a fresh budget", async () => {
+    runtime.sandboxFixedPerTurn = true;
+    const { s } = await engagedLearnTurn();
+    const first = store.latestTurn(s.id)!;
+    idle(s);
+    await flush();
+    const continuation = store.latestTurn(s.id)!;
+    expect(continuation.continuedFrom).toBe(first.id);
+    expect(store.getTurn(first.id)!.continuedFrom).toBeNull();
+    idle(s);
+    await service.send(s.id, "now add a test for 304 responses");
+    expect(store.latestTurn(s.id)!.continuedFrom).toBeNull();
+    expect(runtime.lastPrompt().input.system).toContain("At most 4 checkpoint(s) this turn");
+  });
+
   it("leaves other runtimes unchanged: they unlock within the same turn", async () => {
     const { s, resolved } = await engagedLearnTurn();
     expect(engine().agentOutput(resolved)).toMatch(/Code changes are now unlocked\.$/);

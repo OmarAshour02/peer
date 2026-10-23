@@ -106,6 +106,10 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (runtime, session_id, message_id)
   );
   `,
+  `
+  -- The turn a continuation carries on (runtimes whose sandbox is fixed per turn).
+  ALTER TABLE turns ADD COLUMN continued_from TEXT;
+  `,
 ];
 
 type Row = Record<string, unknown>;
@@ -283,11 +287,11 @@ export class Store {
 
   // -- turns -----------------------------------------------------------------
 
-  createTurn(input: { sessionId: string; mode: CollaborationModeId; intent: TurnIntent; gate: GateKind }): Turn {
-    const turn: Turn = { id: newId("turn"), ...input, engagedAt: null, startedAt: Date.now(), endedAt: null };
+  createTurn(input: { sessionId: string; mode: CollaborationModeId; intent: TurnIntent; gate: GateKind; continuedFrom?: string | null }): Turn {
+    const turn: Turn = { id: newId("turn"), ...input, continuedFrom: input.continuedFrom ?? null, engagedAt: null, startedAt: Date.now(), endedAt: null };
     this.db
-      .prepare("INSERT INTO turns (id, session_id, mode, intent, gate, engaged_at, started_at, ended_at) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL)")
-      .run(turn.id, turn.sessionId, turn.mode, turn.intent, turn.gate, turn.startedAt);
+      .prepare("INSERT INTO turns (id, session_id, mode, intent, gate, continued_from, engaged_at, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL)")
+      .run(turn.id, turn.sessionId, turn.mode, turn.intent, turn.gate, turn.continuedFrom, turn.startedAt);
     return turn;
   }
 
@@ -452,6 +456,7 @@ function toTurn(r: Row): Turn {
     mode: r.mode as CollaborationModeId,
     intent: r.intent as TurnIntent,
     gate: r.gate as GateKind,
+    continuedFrom: r.continued_from == null ? null : String(r.continued_from),
     engagedAt: r.engaged_at == null ? null : Number(r.engaged_at),
     startedAt: Number(r.started_at),
     endedAt: r.ended_at == null ? null : Number(r.ended_at),

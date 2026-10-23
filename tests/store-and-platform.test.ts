@@ -44,6 +44,30 @@ describe("store", () => {
     b.close();
   });
 
+  it("keeps the turn a continuation carries on across reopen, and upgrades older databases", () => {
+    const file = join(dir, "peer.db");
+    const a = new Store(file);
+    const ws = a.upsertWorkspace(dir, "proj");
+    const s = a.createSession({ workspaceId: ws.id, runtime: "codex", runtimeSessionId: "rt1", title: "t", mode: "learn", model: null });
+    const first = a.createTurn({ sessionId: s.id, mode: "learn", intent: "default", gate: "engage" });
+    const continuation = a.createTurn({ sessionId: s.id, mode: "learn", intent: "default", gate: "open", continuedFrom: first.id });
+    // Turn the file back into a database from before the continued_from column, holding one old turn.
+    a.db.exec("ALTER TABLE turns DROP COLUMN continued_from; PRAGMA user_version = 2;");
+    a.db.prepare("INSERT INTO turns (id, session_id, mode, intent, gate, started_at) VALUES ('turn_old', ?, 'learn', 'default', 'open', 1)").run(s.id);
+    a.close();
+
+    const b = new Store(file);
+    expect(b.getTurn("turn_old")!.continuedFrom).toBeNull();
+    const again = b.createTurn({ sessionId: s.id, mode: "learn", intent: "default", gate: "open", continuedFrom: first.id });
+    b.close();
+
+    const c = new Store(file);
+    expect(c.getTurn(again.id)!.continuedFrom).toBe(first.id);
+    expect(c.getTurn(first.id)!.continuedFrom).toBeNull();
+    expect(continuation.continuedFrom).toBe(first.id);
+    c.close();
+  });
+
   it("upserts workspaces by path", () => {
     const store = new Store(":memory:");
     const a = store.upsertWorkspace(dir, "x");

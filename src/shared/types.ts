@@ -114,6 +114,8 @@ export interface Turn {
   mode: CollaborationModeId;
   intent: TurnIntent;
   gate: GateKind;
+  /** For a continuation: the turn whose work it carries on (same task, same checkpoint budget). */
+  continuedFrom: string | null;
   engagedAt: number | null;
   startedAt: number;
   endedAt: number | null;

@@ -200,20 +200,24 @@ export class CollaborationEngine {
       const current = this.store.getSession(sessionId);
       if (!current) return;
       this.store.logEvent(sessionId, "turn.continued", { fromTurnId: turnId });
-      this.startTurn(current, CONTINUATION_TEXT, "default", false, true).catch((err) => {
+      this.startTurn(current, CONTINUATION_TEXT, "default", false, turnId).catch((err) => {
         this.store.logEvent(sessionId, "turn.continue_failed", { fromTurnId: turnId, error: err instanceof Error ? err.message : String(err) });
       });
     });
   }
 
-  private async startTurn(session: PeerSession, text: string, intent: TurnIntent, isResume: boolean, isContinuation = false): Promise<Turn> {
+  /** `continuedFrom`: the turn a continuation carries on; it shares that turn's checkpoint budget. */
+  private async startTurn(session: PeerSession, text: string, intent: TurnIntent, isResume: boolean, continuedFrom: string | null = null): Promise<Turn> {
     this.finishActiveTurn(session.id);
     const previous = this.store.latestTurn(session.id);
+    const isContinuation = continuedFrom !== null;
     // A developer reply after a gated turn in which they did not engage is the engagement. A
     // continuation carries on work the developer already engaged with.
     const awaitingEngagement = isResume || isContinuation || (previous !== null && previous.gate !== "open" && previous.engagedAt === null);
-    const plan = resolveEffectivePolicy(session.mode, intent, awaitingEngagement);
-    const turn = this.store.createTurn({ sessionId: session.id, mode: session.mode, intent, gate: plan.gate });
+    let plan = resolveEffectivePolicy(session.mode, intent, awaitingEngagement);
+    // Same task, same budget: the continuation is told what is left of it.
+    if (continuedFrom) plan = { ...plan, checkpointBudget: Math.max(0, plan.checkpointBudget - this.checkpointsUsed(continuedFrom)) };
+    const turn = this.store.createTurn({ sessionId: session.id, mode: session.mode, intent, gate: plan.gate, continuedFrom });
     this.store.logEvent(session.id, "turn.started", {
       turnId: turn.id,
       mode: session.mode,
@@ -554,10 +558,15 @@ export class CollaborationEngine {
     return null;
   }
 
-  /** Developer-facing checkpoints used in a turn; risk and hint follow-ups are free. */
+  /**
+   * Developer-facing checkpoints used in a turn, including the turn a continuation carries on (one
+   * task, one budget, on every runtime). Risk and hint follow-ups are free.
+   */
   private checkpointsUsed(turnId: string): number {
-    return this.store
-      .listCheckpointsForTurn(turnId)
+    const turn = this.store.getTurn(turnId);
+    const turnIds = turn?.continuedFrom ? [turnId, turn.continuedFrom] : [turnId];
+    return turnIds
+      .flatMap((id) => this.store.listCheckpointsForTurn(id))
       .filter((c) => c.category !== "risk" && c.status !== "auto_resolved" && c.resolution?.action !== "hint").length;
   }
 
