@@ -31,7 +31,7 @@
    - Reopen runtime sub-sessions (subagents).
    - Show checkpoint history per file.
    - Revert a turn (OpenCode supports revert).
-5. **Model handling.** Per-mode default models, and clearer provider-auth flows by integrating OpenCode's provider auth endpoints rather than adding Peer's own key storage.
+5. **Model handling.** Per-mode default models. Local models (Ollama, LM Studio) from *Models & providers* instead of a hand-written OpenCode config. Provider API keys exported in the login shell (e.g. `OPENAI_API_KEY`) reach a Finder-launched Peer only if the developer connects them in Peer; importing them like `PATH` is not done. (Connecting providers in-app is done: *Models & providers*.)
 6. **Updates.** Auto-update via electron-builder (zip + `latest-mac.yml` / AppImage update info). Publish signed builds from tagged CI runs.
 
 ## Later: Learning Space

@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { copyFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DESTRUCTIVE_COMMAND_PATTERNS } from "../../collaboration/safety.js";
+import { importUserCredentials, runtimeAuthFile, userAuthFile } from "./credentials.js";
 
 export interface OpenCodeProcessOptions {
   binary: string;
@@ -72,8 +72,9 @@ export class OpenCodeProcess {
       PEER_BRIDGE_TOKEN: opts.bridgeToken,
       PEER_PARENT_PID: String(process.pid),
     };
-    const auth = readUserAuth(opts.env);
-    if (auth) env.OPENCODE_AUTH_CONTENT = auth;
+    // Not OPENCODE_AUTH_CONTENT: with it set, the runtime ignores credentials saved through its API.
+    delete env.OPENCODE_AUTH_CONTENT;
+    importUserCredentials(userAuthFile(opts.env), runtimeAuthFile(opts.rootDir));
 
     this.stopping = false;
     const child = spawn(opts.binary, ["serve", "--hostname", "127.0.0.1", "--port", "0"], {
@@ -145,22 +146,5 @@ export class OpenCodeProcess {
         // already gone
       }
     }
-  }
-}
-
-/**
- * Reuse credentials from the user's own OpenCode install (`opencode auth login`), so Peer
- * does not need its own key management. Passed to the runtime process only, never to the UI.
- */
-function readUserAuth(env: NodeJS.ProcessEnv): string | null {
-  const dataHome = env.XDG_DATA_HOME || join(env.HOME || homedir(), ".local", "share");
-  const file = join(dataHome, "opencode", "auth.json");
-  if (!existsSync(file)) return null;
-  try {
-    const content = readFileSync(file, "utf8");
-    JSON.parse(content);
-    return content;
-  } catch {
-    return null;
   }
 }

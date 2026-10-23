@@ -53,18 +53,22 @@ export function Sidebar() {
             offline
           </div>
         ) : (
-          <div className="flex items-center gap-2 text-[11px] text-faint">
+          <button
+            onClick={() => usePeer.getState().setProvidersOpen(true)}
+            title="Models & providers"
+            className="flex items-center gap-2 rounded px-1 text-[11px] text-faint hover:bg-raised hover:text-muted"
+          >
             {runtimes.map((r) => (
               <span
                 key={r.kind}
                 className="flex items-center gap-1"
-                title={`${r.name}: ${r.status.state === "ready" ? `ready (${r.status.version ?? "unknown version"})` : (r.status.error ?? r.status.state)}`}
+                title={`${r.name}: ${r.status.state === "ready" ? `ready (${[r.status.version ?? "unknown version", r.status.account].filter(Boolean).join(", ")})` : (r.status.error ?? r.status.state)}`}
               >
                 <span className={`h-1.5 w-1.5 rounded-full ${statusDot(r.status)}`} />
                 {RUNTIME_UI[r.kind].short}
               </span>
             ))}
-          </div>
+          </button>
         )}
       </div>
 

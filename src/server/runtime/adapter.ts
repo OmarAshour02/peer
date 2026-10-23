@@ -3,11 +3,13 @@ import type {
   GateKind,
   ModelRef,
   ModelsResponse,
+  OAuthStart,
   PeerMessage,
   PeerMessageInfo,
   PeerPart,
   PermissionReply,
   PermissionRequest,
+  ProviderCatalog,
   RuntimeKind,
   RuntimeStatus,
   SessionRunStatus,
@@ -56,6 +58,28 @@ export interface AgentRuntimeAdapter {
   listToolIds(directory: string, model: ModelRef): Promise<string[]>;
 
   onEvent(listener: (event: RuntimeEvent) => void): () => void;
+
+  /** Present when Peer can connect this runtime's model providers itself (OpenCode). */
+  readonly providers?: ProviderConnections;
+}
+
+/** A provider request the developer can fix (unknown provider, not removable here, ...). */
+export class ProviderError extends Error {}
+
+/**
+ * Connecting model providers from Peer. Credentials go straight to the runtime's own store;
+ * nothing here returns one.
+ */
+export interface ProviderConnections {
+  catalog(): Promise<ProviderCatalog>;
+  /** `inputs` are the answers to the method's prompts (e.g. a Cloudflare account id). */
+  setKey(providerId: string, key: string, inputs: Record<string, string>): Promise<void>;
+  /** `method` indexes the provider's methods. */
+  startOAuth(providerId: string, method: number, inputs: Record<string, string>): Promise<OAuthStart>;
+  /** "auto" logins wait here until the browser finishes; "code" logins pass the pasted code. */
+  finishOAuth(providerId: string, method: number, code?: string): Promise<void>;
+  /** Only providers connected in Peer ("peer" source) can be disconnected here. */
+  disconnect(providerId: string): Promise<void>;
 }
 
 /**
@@ -88,6 +112,7 @@ export type RuntimeEvent =
   | { type: "runtime.status"; status: RuntimeStatus }
   /** The runtime process came back after a crash; all in-flight runs are gone. */
   | { type: "runtime.restarted" }
+  | { type: "providers.updated"; reloadPending: boolean }
   | { type: "session.updated"; sessionId: string; title: string; parentId: string | null }
   | { type: "session.status"; sessionId: string; status: SessionRunStatus; message?: string }
   | { type: "session.idle"; sessionId: string }

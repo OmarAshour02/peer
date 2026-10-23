@@ -1,8 +1,10 @@
 import { createOpencodeClient, type Event as OcEvent, type OpencodeClient } from "@opencode-ai/sdk/v2";
 import type { ModelRef, ModelsResponse, PeerMessage, PermissionReply, RuntimeStatus } from "../../../shared/types.js";
-import type { AgentRuntimeAdapter, PromptInput, RuntimeEvent } from "../adapter.js";
+import { ProviderError, type AgentRuntimeAdapter, type PromptInput, type ProviderConnections, type RuntimeEvent } from "../adapter.js";
 import { CHECKPOINT_TOOL } from "../../collaboration/prompt.js";
+import { credentialIds, importedIds, markConnectedInPeer, markDisconnectedInPeer, runtimeAuthFile } from "./credentials.js";
 import { OpenCodeProcess, type OpenCodeProcessOptions } from "./process.js";
+import { ProviderReload, toCatalog, type OcAuthMethods, type OcProviderList } from "./providers.js";
 import { errorMessage, mergeTurnDiffs, normalizeDiff, normalizeEvent, normalizeMessage, normalizePart, normalizePermission } from "./normalize.js";
 
 const MAX_RESTARTS = 5;
@@ -23,9 +25,20 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private eventAbort: AbortController | null = null;
   private restarts: number[] = [];
   private stopped = false;
+  /** Directories the runtime has an instance for; checked for running sessions before a provider reload. */
+  private readonly directories = new Set<string>();
+  private readonly reload: ProviderReload;
 
   constructor(private readonly opts: OpenCodeProcessOptions) {
     this.process = new OpenCodeProcess(opts);
+    this.reload = new ProviderReload({
+      anyBusy: () => this.anyBusy(),
+      dispose: async () => {
+        await this.sdk().global.dispose({ throwOnError: true });
+      },
+      onChange: (reloadPending) => this.emit({ type: "providers.updated", reloadPending }),
+      log: opts.log,
+    });
   }
 
   status(): RuntimeStatus {
@@ -70,6 +83,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.reload.reset();
     this.eventAbort?.abort();
     this.eventAbort = null;
     await this.process.stop();
@@ -86,6 +100,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private async handleCrash(code: number | null, signal: NodeJS.Signals | null) {
     this.eventAbort?.abort();
     this.client = null;
+    this.reload.reset();
     const now = Date.now();
     this.restarts = this.restarts.filter((t) => now - t < RESTART_WINDOW_MS);
     const message = `OpenCode runtime exited unexpectedly (code ${code}, signal ${signal}).`;
@@ -118,7 +133,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
             const payload = (item as { payload?: OcEvent }).payload;
             if (!payload) continue;
             const event = normalizeEvent(payload);
-            if (event) this.emit(event);
+            if (!event) continue;
+            this.emit(event);
+            if (event.type === "session.idle" || (event.type === "session.status" && event.status === "idle")) this.reload.poke();
           }
         } catch (err) {
           if (abort.signal.aborted) return;
@@ -136,6 +153,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   async listModels(directory: string): Promise<ModelsResponse> {
+    this.directories.add(directory);
     const res = await this.sdk().config.providers({ directory }, { throwOnError: true });
     const providers = res.data.providers.map((p) => ({
       id: p.id,
@@ -147,6 +165,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   async createSession(directory: string, input: { title?: string }) {
+    this.directories.add(directory);
     // Without an explicit title OpenCode generates one from the first message.
     const res = await this.sdk().session.create({ directory, title: input.title }, { throwOnError: true });
     return { id: res.data.id, title: res.data.title };
@@ -176,15 +195,22 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   async prompt(directory: string, sessionId: string, input: PromptInput): Promise<void> {
-    const res = await this.sdk().session.promptAsync({
-      sessionID: sessionId,
-      directory,
-      system: input.system,
-      tools: input.tools,
-      model: input.model ? { providerID: input.model.providerId, modelID: input.model.modelId } : undefined,
-      parts: [{ type: "text", text: input.text }],
-    });
-    if (res.error) throw new Error(`The runtime rejected the prompt: ${errorMessage(res.error)}`);
+    this.directories.add(directory);
+    // A provider reload would abort this turn, so none runs until the runtime reports it busy.
+    const release = await this.reload.hold();
+    try {
+      const res = await this.sdk().session.promptAsync({
+        sessionID: sessionId,
+        directory,
+        system: input.system,
+        tools: input.tools,
+        model: input.model ? { providerID: input.model.providerId, modelID: input.model.modelId } : undefined,
+        parts: [{ type: "text", text: input.text }],
+      });
+      if (res.error) throw new Error(`The runtime rejected the prompt: ${errorMessage(res.error)}`);
+    } finally {
+      release();
+    }
   }
 
   async abort(directory: string, sessionId: string): Promise<void> {
@@ -204,4 +230,66 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const res = await this.sdk().tool.list({ directory, provider: model.providerId, model: model.modelId }, { throwOnError: true });
     return res.data.map((t) => t.id);
   }
+
+  private async anyBusy(): Promise<boolean> {
+    for (const directory of this.directories) {
+      const res = await this.sdk().session.status({ directory }, { throwOnError: true });
+      if (Object.values(res.data).some((status) => status.type !== "idle")) return true;
+    }
+    return false;
+  }
+
+  /** Known provider ids only, so a request cannot write arbitrary entries into the credential file. */
+  private async requireProvider(providerId: string): Promise<OcProviderList["all"][number]> {
+    const res = await this.sdk().provider.list({}, { throwOnError: true });
+    const provider = (res.data as OcProviderList).all.find((p) => p.id === providerId);
+    if (!provider) throw new ProviderError(`Unknown provider "${providerId}"`);
+    return provider;
+  }
+
+  readonly providers: ProviderConnections = {
+    catalog: async () => {
+      const [list, methods] = await Promise.all([
+        this.sdk().provider.list({}, { throwOnError: true }),
+        this.sdk().provider.auth({}, { throwOnError: true }),
+      ]);
+      return toCatalog(
+        list.data as OcProviderList,
+        methods.data as OcAuthMethods,
+        credentialIds(runtimeAuthFile(this.opts.rootDir)),
+        importedIds(runtimeAuthFile(this.opts.rootDir)),
+        this.reload.isPending,
+      );
+    },
+    setKey: async (providerId, key, inputs) => {
+      await this.requireProvider(providerId);
+      const metadata = Object.keys(inputs).length > 0 ? inputs : undefined;
+      await this.sdk().auth.set({ providerID: providerId, auth: { type: "api", key, metadata } }, { throwOnError: true });
+      markConnectedInPeer(runtimeAuthFile(this.opts.rootDir), providerId);
+      await this.reload.request();
+    },
+    startOAuth: async (providerId, method, inputs) => {
+      await this.requireProvider(providerId);
+      const res = await this.sdk().provider.oauth.authorize({ providerID: providerId, method, inputs }, { throwOnError: true });
+      return { url: res.data.url, mode: res.data.method, instructions: res.data.instructions };
+    },
+    finishOAuth: async (providerId, method, code) => {
+      await this.requireProvider(providerId);
+      const res = await this.sdk().provider.oauth.callback({ providerID: providerId, method, code }, { throwOnError: true });
+      if (res.data !== true) throw new ProviderError("The provider did not complete the login.");
+      markConnectedInPeer(runtimeAuthFile(this.opts.rootDir), providerId);
+      await this.reload.request();
+    },
+    disconnect: async (providerId) => {
+      if (importedIds(runtimeAuthFile(this.opts.rootDir)).has(providerId)) {
+        throw new ProviderError("This provider comes from your own OpenCode login, which Peer imports on every start. Remove it there first (`opencode auth logout`), then restart the runtime.");
+      }
+      if (!credentialIds(runtimeAuthFile(this.opts.rootDir)).has(providerId)) {
+        throw new ProviderError("Only providers connected in Peer can be disconnected here.");
+      }
+      await this.sdk().auth.remove({ providerID: providerId }, { throwOnError: true });
+      markDisconnectedInPeer(runtimeAuthFile(this.opts.rootDir), providerId);
+      await this.reload.request();
+    },
+  };
 }

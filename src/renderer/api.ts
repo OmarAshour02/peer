@@ -5,11 +5,13 @@ import type {
   FileDiff,
   ModelRef,
   ModelsResponse,
+  OAuthStart,
   PeerEvent,
   PeerMessage,
   PeerSession,
   PermissionReply,
   Preferences,
+  ProviderCatalog,
   RuntimeInfo,
   RuntimeKind,
   RuntimeStatus,
@@ -85,6 +87,15 @@ export class PeerApi {
 
   health = () => this.request<{ runtime: RuntimeStatus; runtimes: RuntimeInfo[] }>("GET", "/health");
   restartRuntime = (kind: RuntimeKind) => this.request<RuntimeInfo>("POST", `/runtimes/${kind}/restart`);
+  providers = (kind: RuntimeKind) => this.request<ProviderCatalog>("GET", `/runtimes/${kind}/providers`);
+  setProviderKey = (kind: RuntimeKind, providerId: string, key: string, inputs: Record<string, string>) =>
+    this.request<ProviderCatalog>("POST", `/runtimes/${kind}/providers/${encodeURIComponent(providerId)}/key`, { key, inputs });
+  startOAuth = (kind: RuntimeKind, providerId: string, method: number, inputs: Record<string, string>) =>
+    this.request<OAuthStart>("POST", `/runtimes/${kind}/providers/${encodeURIComponent(providerId)}/oauth`, { method, inputs });
+  finishOAuth = (kind: RuntimeKind, providerId: string, method: number, code?: string) =>
+    this.request<ProviderCatalog>("POST", `/runtimes/${kind}/providers/${encodeURIComponent(providerId)}/oauth/callback`, { method, code });
+  disconnectProvider = (kind: RuntimeKind, providerId: string) =>
+    this.request<ProviderCatalog>("DELETE", `/runtimes/${kind}/providers/${encodeURIComponent(providerId)}`);
   preferences = () => this.request<Preferences>("GET", "/preferences");
   setPreferences = (prefs: Partial<Preferences>) => this.request<Preferences>("PATCH", "/preferences", prefs);
   workspaces = () => this.request<Workspace[]>("GET", "/workspaces");

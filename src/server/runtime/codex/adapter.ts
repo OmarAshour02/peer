@@ -141,6 +141,16 @@ interface Run {
  * when the developer engages mid-turn the engine continues in a new, writable turn
  * (sandboxFixedPerTurn). Checkpoints are a dynamic tool.
  */
+/**
+ * How Codex is signed in, from `codex login status` ("Logged in using ChatGPT"). Only the method:
+ * an API-key login also prints part of the key.
+ */
+export function codexAccount(output: string): string | undefined {
+  if (/ChatGPT/i.test(output)) return "ChatGPT";
+  if (/API key/i.test(output)) return "OpenAI API key";
+  return undefined;
+}
+
 export class CodexAdapter implements AgentRuntimeAdapter {
   readonly kind = "codex" as const;
   readonly name = "Codex";
@@ -151,6 +161,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
   private rpc: CodexRpc | null = null;
   private current: RuntimeStatus = { state: "stopped" };
   private version: string | undefined;
+  private account: string | undefined;
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
   /** Threads loaded in the current app-server process. */
   private loaded = new Set<string>();
@@ -208,9 +219,10 @@ export class CodexAdapter implements AgentRuntimeAdapter {
       this.setStatus({ state: "unavailable", error: "Codex is not logged in. Run `codex login` in a terminal, then restart this runtime." });
       return;
     }
+    this.account = codexAccount(login.stdout + login.stderr);
     try {
       await this.spawn();
-      this.setStatus({ state: "ready", version: this.version });
+      this.setStatus({ state: "ready", version: this.version, account: this.account });
     } catch (err) {
       this.setStatus({ state: "error", error: `Codex app-server failed to start: ${err instanceof Error ? err.message : String(err)}` });
       throw err;
@@ -267,7 +279,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
     if (this.stopped || this.rpc) return;
     try {
       await this.spawn();
-      this.setStatus({ state: "ready", version: this.version });
+      this.setStatus({ state: "ready", version: this.version, account: this.account });
       this.emit({ type: "runtime.restarted" });
     } catch (err) {
       this.setStatus({ state: "error", error: `Codex app-server failed to restart: ${err instanceof Error ? err.message : String(err)}` });

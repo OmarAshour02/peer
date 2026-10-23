@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { PeerApi, resolveConfig } from "./api";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { Composer } from "./components/Composer";
+import { ProvidersDialog } from "./components/ProvidersDialog";
 import { Sidebar } from "./components/Sidebar";
 import { Transcript } from "./components/Transcript";
 import { MODE_UI } from "./modes";
@@ -12,6 +13,7 @@ export function App() {
   const { ready, error, activeWorkspaceId, activeSessionId, snapshot, modelsError, workspaces, api } = usePeer();
   const kind = usePeer(activeRuntime);
   const runtimes = usePeer((s) => s.runtimes);
+  const providersOpen = usePeer((s) => s.providersOpen);
   const runtime = runtimeInfo({ runtimes }, kind).status;
   const [fatal, setFatal] = useState<string | null>(null);
   const [showChanges, setShowChanges] = useState(true);
@@ -25,17 +27,14 @@ export function App() {
         return;
       }
       const api = new PeerApi(config);
-      const { handleEvent, resync } = usePeer.getState();
+      const { handleEvent } = usePeer.getState();
       let wasDisconnected = false;
       unsubscribe = api.events(
         handleEvent,
         () => {
           usePeer.setState({ connected: true });
           // After a reconnect, state on the server may have moved on: reload what's on screen.
-          if (wasDisconnected) {
-            void api.health().then((h) => usePeer.setState({ runtimes: h.runtimes }));
-            void resync();
-          }
+          if (wasDisconnected) void usePeer.getState().reconnected();
           wasDisconnected = false;
         },
         () => {
@@ -61,6 +60,7 @@ export function App() {
 
   return (
     <div className="flex h-full" data-peer-ready="true">
+      {providersOpen && <ProvidersDialog />}
       <Sidebar />
       <main className="flex min-w-0 flex-1 flex-col">
         {runtime.state !== "ready" && (
@@ -78,8 +78,15 @@ export function App() {
           </div>
         )}
         {runtime.state === "ready" && modelsError && activeWorkspaceId && (
-          <div className="border-b border-line bg-warn/10 px-4 py-2 text-[12px] text-warn">
-            {modelsError} {RUNTIME_UI[kind].setup}
+          <div className="flex items-center gap-3 border-b border-line bg-warn/10 px-4 py-2 text-[12px] text-warn">
+            <span className="min-w-0 flex-1">
+              {modelsError} {RUNTIME_UI[kind].setup}
+            </span>
+            {kind === "opencode" && (
+              <button onClick={() => usePeer.getState().setProvidersOpen(true)} className="rounded border border-warn/60 px-2 py-0.5">
+                Connect a provider
+              </button>
+            )}
           </div>
         )}
         {error && (
