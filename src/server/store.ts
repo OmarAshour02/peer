@@ -411,7 +411,9 @@ export class Store {
     const runtime = get("defaultRuntime") as RuntimeKind | undefined;
     return {
       defaultMode: (get("defaultMode") as CollaborationModeId | undefined) ?? DEFAULT_MODE,
+      // Resolved against runtime availability by PeerService.preferences().
       defaultRuntime: runtime && RUNTIME_KINDS.includes(runtime) ? runtime : DEFAULT_RUNTIME,
+      runtimeChosen: runtime && RUNTIME_KINDS.includes(runtime) ? runtime : null,
       lastSessionId: lastSessionId && this.getSession(lastSessionId) ? lastSessionId : null,
     };
   }

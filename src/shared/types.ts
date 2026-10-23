@@ -89,6 +89,20 @@ export const RUNTIME_KINDS = ["opencode", "claude", "codex"] as const;
 export type RuntimeKind = (typeof RUNTIME_KINDS)[number];
 export const DEFAULT_RUNTIME: RuntimeKind = "opencode";
 
+/**
+ * Until the developer picks a runtime, new sessions use the first of these that is ready: the
+ * agents they are already signed in to first, the bundled runtime (any other model) last.
+ */
+export const RUNTIME_PREFERENCE: readonly RuntimeKind[] = ["claude", "codex", "opencode"];
+
+/** The runtime for new sessions: the developer's own pick while it is usable, else the best one that is ready. */
+export function pickDefaultRuntime(chosen: RuntimeKind | null, runtimes: readonly { kind: RuntimeKind; status: { state: string } }[]): RuntimeKind {
+  const state = (kind: RuntimeKind) => runtimes.find((r) => r.kind === kind)?.status.state;
+  // A pick that is down (not installed, crashed, stopped) gives way, but stays stored for when it is back.
+  if (chosen && (state(chosen) === "ready" || state(chosen) === "starting")) return chosen;
+  return RUNTIME_PREFERENCE.find((k) => state(k) === "ready") ?? RUNTIME_PREFERENCE.find((k) => state(k) === "starting") ?? chosen ?? DEFAULT_RUNTIME;
+}
+
 export interface ModelRef {
   providerId: string;
   modelId: string;
@@ -196,6 +210,61 @@ export interface RuntimeStatus {
   state: "starting" | "ready" | "error" | "stopped" | "unavailable";
   version?: string;
   error?: string;
+  /** How the runtime's own CLI is signed in, e.g. "Claude Pro" or "ChatGPT". Never an email or a secret. */
+  account?: string;
+}
+
+/**
+ * Where a connected OpenCode provider's credentials come from:
+ * - "peer": connected in Peer (stored in Peer's own OpenCode data, can be disconnected there)
+ * - "opencode-login": the developer's own `opencode auth login` (Peer re-imports it on every start)
+ * - "environment": an API key variable such as OPENAI_API_KEY
+ * - "config": the developer's OpenCode config file
+ * - "built-in": needs no credentials (OpenCode's free models)
+ */
+export type ProviderSource = "peer" | "opencode-login" | "environment" | "config" | "built-in";
+
+/** One question a login method asks before it can run (e.g. an enterprise URL). */
+export interface ProviderAuthPrompt {
+  type: "text" | "select";
+  key: string;
+  message: string;
+  placeholder?: string;
+  options?: { label: string; value: string; hint?: string }[];
+  /** Ask only when another answer matches. */
+  when?: { key: string; op: "eq" | "neq"; value: string };
+}
+
+export interface ProviderAuthMethodInfo {
+  type: "api" | "oauth";
+  label: string;
+  prompts: ProviderAuthPrompt[];
+}
+
+/** A model provider the bundled OpenCode runtime can use. Never carries a credential. */
+export interface ProviderEntry {
+  id: string;
+  name: string;
+  connected: boolean;
+  source?: ProviderSource;
+  modelCount: number;
+  /** Ways to connect it, in OpenCode's order (the index is the OAuth method number). */
+  methods: ProviderAuthMethodInfo[];
+  /** Environment variables OpenCode reads a key from, e.g. ["OPENAI_API_KEY"]. */
+  env: string[];
+}
+
+export interface ProviderCatalog {
+  providers: ProviderEntry[];
+  /** A connection changed while an OpenCode session was running; models refresh once it is idle. */
+  reloadPending: boolean;
+}
+
+/** The first step of a browser login: open `url`; "code" logins then need the code the page shows. */
+export interface OAuthStart {
+  url: string;
+  mode: "auto" | "code";
+  instructions: string;
 }
 
 export interface RuntimeInfo {
@@ -217,8 +286,10 @@ export interface SessionSnapshot {
 
 export interface Preferences {
   defaultMode: CollaborationModeId;
-  /** Runtime for new sessions; the last one the developer picked. */
+  /** Runtime for new sessions (see `pickDefaultRuntime`). */
   defaultRuntime: RuntimeKind;
+  /** The runtime the developer last picked, or null if they never did (then Peer picks). */
+  runtimeChosen: RuntimeKind | null;
   /** Session to reopen on launch. Kept server-side: the UI origin (port) changes between launches. */
   lastSessionId: string | null;
 }
@@ -228,6 +299,8 @@ export interface Preferences {
 
 export type PeerEvent =
   | { type: "runtime.status"; runtime: RuntimeKind; status: RuntimeStatus }
+  /** The runtime's connected providers (and so its models) changed. */
+  | { type: "providers.updated"; runtime: RuntimeKind; reloadPending: boolean }
   | { type: "session.updated"; session: PeerSession }
   | { type: "session.status"; sessionId: string; status: SessionRunStatus; message?: string }
   | { type: "session.error"; sessionId: string; error: string }

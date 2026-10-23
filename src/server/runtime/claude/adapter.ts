@@ -84,6 +84,27 @@ const FALLBACK_MODELS = [
  * included) and forces an approval for destructive shell commands; approvals Claude Code asks
  * for reach the developer as Peer permission cards; checkpoints are an in-process MCP tool.
  */
+/** The parts of `claude auth status --json` Peer reads (it also prints the account email, which Peer does not show). */
+export interface ClaudeAuthStatus {
+  loggedIn?: boolean;
+  authMethod?: string;
+  apiProvider?: string;
+  subscriptionType?: string;
+}
+
+const CLAUDE_API_PROVIDERS: Record<string, string> = { bedrock: "Amazon Bedrock", vertex: "Google Vertex AI", foundry: "Microsoft Foundry" };
+
+/** How Claude Code is signed in, for the UI: "Claude Pro", "Anthropic API key", "Amazon Bedrock", ... */
+export function claudeAccount(info: ClaudeAuthStatus, loggedIn: boolean): string {
+  if (info.apiProvider && info.apiProvider !== "firstParty") return CLAUDE_API_PROVIDERS[info.apiProvider] ?? info.apiProvider;
+  if (!loggedIn) return "ANTHROPIC_API_KEY";
+  if (info.authMethod === "claude.ai") {
+    const plan = info.subscriptionType ? info.subscriptionType.charAt(0).toUpperCase() + info.subscriptionType.slice(1) : "";
+    return plan ? `Claude ${plan}` : "Claude account";
+  }
+  return "Anthropic API key";
+}
+
 export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   readonly kind = "claude" as const;
   readonly name = "Claude Code";
@@ -136,18 +157,18 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       return;
     }
     const auth = await runCli(this.binary, ["auth", "status", "--json"], this.opts.env);
-    let loggedIn = false;
+    let info: ClaudeAuthStatus = {};
     try {
-      const info = JSON.parse(auth.stdout) as { loggedIn?: boolean; apiProvider?: string };
-      loggedIn = Boolean(info.loggedIn) || (info.apiProvider !== undefined && info.apiProvider !== "firstParty");
+      info = JSON.parse(auth.stdout) as ClaudeAuthStatus;
     } catch {
-      loggedIn = false;
+      info = {};
     }
+    const loggedIn = Boolean(info.loggedIn) || (info.apiProvider !== undefined && info.apiProvider !== "firstParty");
     if (!loggedIn && !this.opts.env.ANTHROPIC_API_KEY) {
       this.setStatus({ state: "unavailable", error: "Claude Code is not logged in. Run `claude auth login` in a terminal, then restart this runtime." });
       return;
     }
-    this.setStatus({ state: "ready", version: version.stdout.trim().split(/\s/)[0] });
+    this.setStatus({ state: "ready", version: version.stdout.trim().split(/\s/)[0], account: claudeAccount(info, loggedIn) });
   }
 
   async stop(): Promise<void> {

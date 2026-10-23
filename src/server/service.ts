@@ -5,8 +5,10 @@ import type {
   PermissionReply,
   PermissionRequest,
   RuntimeKind,
+  Preferences,
   SessionSnapshot,
 } from "../shared/types.js";
+import { pickDefaultRuntime } from "../shared/types.js";
 import { CollaborationEngine, EngineError } from "./collaboration/engine.js";
 import type { EventHub } from "./hub.js";
 import type { AgentRuntimeAdapter, RuntimeEvent } from "./runtime/adapter.js";
@@ -50,6 +52,12 @@ export class PeerService {
     return runtime;
   }
 
+  /** Stored preferences, with the runtime for new sessions resolved against what is available now. */
+  preferences(): Preferences {
+    const prefs = this.store.getPreferences();
+    return { ...prefs, defaultRuntime: pickDefaultRuntime(prefs.runtimeChosen, this.runtimes.info()) };
+  }
+
   // -- workspaces & sessions ---------------------------------------------------
 
   addWorkspace(path: unknown) {
@@ -63,10 +71,11 @@ export class PeerService {
   ): Promise<PeerSession> {
     const ws = this.store.getWorkspace(workspaceId);
     if (!ws) throw new EngineError("Unknown workspace", 404);
-    const prefs = this.store.getPreferences();
+    const prefs = this.preferences();
     const runtime = this.requireRuntime(input.runtime ?? prefs.defaultRuntime);
     const runtimeSession = await runtime.createSession(ws.path, {});
     const mode = input.mode ?? prefs.defaultMode;
+    // Asking for another runtime than the default is a choice; using the default is not.
     if (input.runtime && input.runtime !== prefs.defaultRuntime) this.store.setPreferences({ defaultRuntime: input.runtime });
     const session = this.store.createSession({
       workspaceId,
@@ -164,6 +173,9 @@ export class PeerService {
     switch (event.type) {
       case "runtime.status":
         this.hub.emit({ type: "runtime.status", runtime: kind, status: event.status });
+        return;
+      case "providers.updated":
+        this.hub.emit({ type: "providers.updated", runtime: kind, reloadPending: event.reloadPending });
         return;
       case "runtime.restarted":
         this.engine.handleRuntimeRestart(kind);

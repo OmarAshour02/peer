@@ -12,6 +12,7 @@ import type {
   SessionSnapshot,
   Workspace,
 } from "../shared/types";
+import { pickDefaultRuntime } from "../shared/types";
 import type { PeerApi } from "./api";
 
 interface PeerState {
@@ -21,6 +22,8 @@ interface PeerState {
   runtimes: RuntimeInfo[];
   /** Runtime for the next new session (remembered server-side). */
   newRuntime: RuntimeKind;
+  /** The developer's own pick; while null, `newRuntime` follows the best runtime that is ready. */
+  runtimeChosen: RuntimeKind | null;
   workspaces: Workspace[];
   sessions: PeerSession[];
   activeWorkspaceId: string | null;
@@ -33,6 +36,10 @@ interface PeerState {
   modelsFor: RuntimeKind | null;
   modelsError: string | null;
   error: string | null;
+  /** The "Models & providers" dialog. */
+  providersOpen: boolean;
+  /** Bumped when a runtime's providers change, so an open dialog reloads them. */
+  providersVersion: number;
 
   init(api: PeerApi): Promise<void>;
   selectWorkspace(id: string | null): Promise<void>;
@@ -40,8 +47,11 @@ interface PeerState {
   setNewRuntime(kind: RuntimeKind): void;
   loadModels(kind: RuntimeKind): Promise<void>;
   resync(): Promise<void>;
+  /** The event stream came back: reload everything an event may have changed meanwhile. */
+  reconnected(): Promise<void>;
   handleEvent(event: PeerEvent): void;
   setError(error: string | null): void;
+  setProvidersOpen(open: boolean): void;
 }
 
 function upsertPart(messages: PeerMessage[], messageId: string, part: PeerPart): PeerMessage[] {
@@ -78,6 +88,7 @@ export const usePeer = create<PeerState>((set, get) => ({
   connected: false,
   runtimes: [],
   newRuntime: "opencode",
+  runtimeChosen: null,
   workspaces: [],
   sessions: [],
   activeWorkspaceId: null,
@@ -89,11 +100,13 @@ export const usePeer = create<PeerState>((set, get) => ({
   modelsFor: null,
   modelsError: null,
   error: null,
+  providersOpen: false,
+  providersVersion: 0,
 
   async init(api) {
     set({ api });
     const [workspaces, health, prefs] = await Promise.all([api.workspaces(), api.health(), api.preferences()]);
-    set({ workspaces, runtimes: health.runtimes, newRuntime: prefs.defaultRuntime, ready: true });
+    set({ workspaces, runtimes: health.runtimes, newRuntime: prefs.defaultRuntime, runtimeChosen: prefs.runtimeChosen, ready: true });
     // Reopen where the developer left off (workspaces are ordered by last use).
     const last = prefs.lastSessionId ? await api.snapshot(prefs.lastSessionId).catch(() => null) : null;
     const ws = workspaces.find((w) => w.id === last?.session.workspaceId) ?? workspaces[0];
@@ -127,7 +140,7 @@ export const usePeer = create<PeerState>((set, get) => ({
   },
 
   setNewRuntime(kind) {
-    set({ newRuntime: kind });
+    set({ newRuntime: kind, runtimeChosen: kind });
     get().api?.setPreferences({ defaultRuntime: kind }).catch(() => {});
     if (!get().snapshot) void get().loadModels(kind);
   },
@@ -153,8 +166,25 @@ export const usePeer = create<PeerState>((set, get) => ({
     }
   },
 
+  async reconnected() {
+    const { api } = get();
+    if (!api) return;
+    // Providers may have changed while events were missed: refresh an open dialog and the model list.
+    set((s) => ({ providersVersion: s.providersVersion + 1 }));
+    await api
+      .health()
+      .then((h) => set({ runtimes: h.runtimes, newRuntime: pickDefaultRuntime(get().runtimeChosen, h.runtimes) }))
+      .catch(() => {});
+    const kind = get().modelsFor ?? activeRuntime(get());
+    await Promise.all([get().loadModels(kind), get().resync()]);
+  },
+
   setError(error) {
     set({ error });
+  },
+
+  setProvidersOpen(open) {
+    set({ providersOpen: open });
   },
 
   handleEvent(event) {
@@ -163,11 +193,26 @@ export const usePeer = create<PeerState>((set, get) => ({
       case "runtime.status": {
         const others = s.runtimes.filter((r) => r.kind !== event.runtime);
         const name = s.runtimes.find((r) => r.kind === event.runtime)?.name ?? event.runtime;
-        set({ runtimes: [...others, { kind: event.runtime, name, status: event.status }].sort(byKind) });
-        // A runtime that just became ready may now list its models.
-        if (event.status.state === "ready" && s.modelsFor === event.runtime && !s.models) void get().loadModels(event.runtime);
+        const runtimes = [...others, { kind: event.runtime, name, status: event.status }].sort(byKind);
+        set({ runtimes });
+        // New sessions follow the best runtime that is ready, unless the developer picked one that still works.
+        const next = pickDefaultRuntime(s.runtimeChosen, runtimes);
+        if (next !== s.newRuntime) {
+          set({ newRuntime: next });
+          if (!s.snapshot) void get().loadModels(next);
+        }
+        // A runtime that just became ready may now list its models; after a restart they can differ
+        // (OpenCode re-reads credentials on start).
+        const wasReady = s.runtimes.find((r) => r.kind === event.runtime)?.status.state === "ready";
+        if (event.status.state === "ready" && s.modelsFor === event.runtime && (!s.models || !wasReady)) void get().loadModels(event.runtime);
+        if (event.status.state === "ready" && !wasReady) set({ providersVersion: get().providersVersion + 1 });
         return;
       }
+      case "providers.updated":
+        set({ providersVersion: s.providersVersion + 1 });
+        // The model list changes once the runtime has reloaded its providers.
+        if (!event.reloadPending && s.modelsFor === event.runtime) void get().loadModels(event.runtime);
+        return;
       case "session.updated": {
         const session = event.session;
         if (session.workspaceId === s.activeWorkspaceId) {

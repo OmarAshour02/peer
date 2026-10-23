@@ -13,6 +13,7 @@ import { Transcript } from "../src/server/runtime/transcript.js";
 import { PeerService } from "../src/server/service.js";
 import { Store } from "../src/server/store.js";
 import type { RuntimeEvent } from "../src/server/runtime/adapter.js";
+import { pickDefaultRuntime } from "../src/shared/types.js";
 import { FakeRuntime } from "./helpers.js";
 
 describe("safety rules shared by all runtimes", () => {
@@ -115,12 +116,12 @@ describe("multiple runtimes", () => {
 
   it("routes each session to its runtime and names that runtime's checkpoint tool", async () => {
     const ws = service.addWorkspace(dir);
-    const a = await service.createSession(ws.id, {});
+    const a = await service.createSession(ws.id, { runtime: "opencode" });
     const b = await service.createSession(ws.id, { runtime: "claude", mode: "learn" });
     expect(a.runtime).toBe("opencode");
     expect(b.runtime).toBe("claude");
     // The last runtime picked becomes the default for new sessions.
-    expect(store.getPreferences().defaultRuntime).toBe("claude");
+    expect(store.getPreferences().runtimeChosen).toBe("claude");
 
     await service.send(b.id, "task");
     expect(opencode.prompts).toHaveLength(0);
@@ -133,6 +134,39 @@ describe("multiple runtimes", () => {
     await service.abort(b.id);
     expect(claude.aborted).toEqual([b.runtimeSessionId]);
     expect(opencode.aborted).toEqual([]);
+  });
+
+  it("defaults new sessions to an agent the developer is signed in to, until they pick one", async () => {
+    const ws = service.addWorkspace(dir);
+    // Claude Code is ready (Codex is not installed here): it wins over the bundled runtime.
+    expect(service.preferences()).toMatchObject({ defaultRuntime: "claude", runtimeChosen: null });
+    const auto = await service.createSession(ws.id, { runtime: "claude" });
+    expect(auto.runtime).toBe("claude");
+    // Using the default is not a choice; asking for another runtime is.
+    expect(store.getPreferences().runtimeChosen).toBeNull();
+    await service.createSession(ws.id, { runtime: "opencode" });
+    expect(service.preferences()).toMatchObject({ defaultRuntime: "opencode", runtimeChosen: "opencode" });
+  });
+
+  it("picks the runtime for new sessions from the developer's choice and what is ready", () => {
+    const rt = (claude: string, codex: string, opencode = "ready") => [
+      { kind: "opencode" as const, status: { state: opencode } },
+      { kind: "claude" as const, status: { state: claude } },
+      { kind: "codex" as const, status: { state: codex } },
+    ];
+    expect(pickDefaultRuntime(null, rt("ready", "ready"))).toBe("claude");
+    expect(pickDefaultRuntime(null, rt("unavailable", "ready"))).toBe("codex");
+    expect(pickDefaultRuntime(null, rt("unavailable", "unavailable"))).toBe("opencode");
+    // Claude Code still starting: use what is ready now (the UI switches once Claude is ready).
+    expect(pickDefaultRuntime(null, rt("starting", "unavailable"))).toBe("opencode");
+    // The developer's pick sticks, unless that runtime is unavailable (then it comes back once it is).
+    expect(pickDefaultRuntime("opencode", rt("ready", "ready"))).toBe("opencode");
+    expect(pickDefaultRuntime("codex", rt("ready", "unavailable"))).toBe("claude");
+    expect(pickDefaultRuntime("codex", rt("ready", "starting"))).toBe("codex");
+    // Crashed or stopped: new sessions would fail there, so they go elsewhere until it is back.
+    expect(pickDefaultRuntime("claude", rt("error", "unavailable"))).toBe("opencode");
+    expect(pickDefaultRuntime("claude", rt("stopped", "ready"))).toBe("codex");
+    expect(pickDefaultRuntime(null, rt("error", "error", "error"))).toBe("opencode");
   });
 
   it("refuses sessions on an unavailable runtime with its setup hint", async () => {
