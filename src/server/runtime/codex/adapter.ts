@@ -113,8 +113,8 @@ interface Run {
   messageId: string;
   abort: AbortController;
   approvals: Map<string, PendingApproval>;
-  /** Paths each in-flight fileChange item touches, for approval checks. */
-  filePaths: Map<string, string[]>;
+  /** The changes (path, kind, diff) of each in-flight fileChange item, for approval checks. */
+  fileChanges: Map<string, Record<string, unknown>[]>;
   /** Items Peer declined, with the reason (Codex itself only reports "declined"). */
   declined: Map<string, string>;
   /** Sandbox-blocked commands and untested changes, for the turn's "Not verified" warning. */
@@ -390,7 +390,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
       messageId: `turn_${randomUUID()}`,
       abort: new AbortController(),
       approvals: new Map(),
-      filePaths: new Map(),
+      fileChanges: new Map(),
       declined: new Map(),
       testEvidence: new TestEvidence(),
       snapshots: Promise.resolve(),
@@ -534,9 +534,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
       case "item/completed": {
         const item = params.item as CodexItem | undefined;
         if (!item) return;
-        if (item.type === "fileChange" && Array.isArray(item.changes)) {
-          run.filePaths.set(item.id, (item.changes as { path?: unknown }[]).map((c) => String(c.path ?? "")));
-        }
+        if (item.type === "fileChange" && Array.isArray(item.changes)) run.fileChanges.set(item.id, item.changes as Record<string, unknown>[]);
         if (method === "item/started" && item.type === "mcpToolCall" && item.readOnlyHint !== true) void this.checkMcpCall(run, item);
         if (method === "item/completed" && run.testEvidence.observe(item) && run.preTestTrees.has(item.id)) run.testedTree = run.preTestTrees.get(item.id);
         let part = normalizeItem(item, run.directory);
@@ -623,8 +621,8 @@ export class CodexAdapter implements AgentRuntimeAdapter {
     if (req.method === "item/commandExecution/requestApproval") {
       const command = unwrapShell(String(p.command ?? ""));
       pattern = command;
-      const gate = await this.opts.hooks.checkTool(run.sessionId, "bash", { command });
-      if (!gate.allow) return this.decline(rpc, run, req, gate.reason);
+      const gate = await this.opts.hooks.checkTool(run.sessionId, "bash", { command, cwd: typeof p.cwd === "string" ? p.cwd : undefined }, run.abort.signal);
+      if (!gate.allow) return this.decline(rpc, run, req, gate.reason, gate.explain);
       if (isDestructiveCommand(command)) needsDeveloper = "Destructive command";
       else if (p.networkApprovalContext || (Array.isArray(p.proposedNetworkPolicyAmendments) && p.proposedNetworkPolicyAmendments.length)) needsDeveloper = "Network access";
       else if (p.reason) needsDeveloper = String(p.reason);
@@ -632,18 +630,19 @@ export class CodexAdapter implements AgentRuntimeAdapter {
       else if (typeof p.cwd === "string" && !inside(run.directory, p.cwd)) needsDeveloper = "Runs outside the workspace";
     } else if (req.method === "item/fileChange/requestApproval") {
       permission = "edit";
-      const paths = run.filePaths.get(String(p.itemId)) ?? [];
+      const changes = run.fileChanges.get(String(p.itemId)) ?? [];
+      const paths = changes.map((c) => String(c.path ?? ""));
       pattern = paths.map((f) => relative(run.directory, f) || f).join(", ") || "file changes";
-      const gate = await this.opts.hooks.checkTool(run.sessionId, "apply_patch", { files: paths });
-      if (!gate.allow) return this.decline(rpc, run, req, gate.reason);
+      const gate = await this.opts.hooks.checkTool(run.sessionId, "apply_patch", { files: paths, changes }, run.abort.signal);
+      if (!gate.allow) return this.decline(rpc, run, req, gate.reason, gate.explain);
       if (p.grantRoot) needsDeveloper = `Write access to ${String(p.grantRoot)}`;
       else if (p.reason) needsDeveloper = String(p.reason);
       else if (paths.length === 0 || paths.some((f) => !inside(run.directory, f))) needsDeveloper = "Changes outside the workspace";
     } else {
       permission = "permissions";
       pattern = JSON.stringify(p.permissions ?? {});
-      const gate = await this.opts.hooks.checkTool(run.sessionId, "permissions", {});
-      if (!gate.allow) return this.decline(rpc, run, req, gate.reason);
+      const gate = await this.opts.hooks.checkTool(run.sessionId, "permissions", {}, run.abort.signal);
+      if (!gate.allow) return this.decline(rpc, run, req, gate.reason, gate.explain);
       needsDeveloper = String(p.reason ?? "Additional permissions");
     }
 
@@ -676,10 +675,22 @@ export class CodexAdapter implements AgentRuntimeAdapter {
     await this.abort(run.directory, run.sessionId);
   }
 
-  private decline(rpc: CodexRpc, run: Run, req: RpcRequest, reason: string) {
+  private decline(rpc: CodexRpc, run: Run, req: RpcRequest, reason: string, explain = false) {
     // Codex only tells the model "declined"; keep the reason for the transcript.
     if (typeof req.params.itemId === "string") run.declined.set(req.params.itemId, reason);
     rpc.respond(req.id, approvalResponse(req.method, req.params, "reject"));
+    // When the reason is the developer's decision, the model needs it: add it to the running turn.
+    if (explain) void this.steer(rpc, run, typeof req.params.turnId === "string" ? req.params.turnId : run.turnId, reason);
+  }
+
+  /** Add input to the turn in progress (turn/steer). Best effort: the turn may have ended meanwhile. */
+  private async steer(rpc: CodexRpc, run: Run, turnId: string | null, text: string) {
+    if (!turnId || this.runs.get(run.sessionId) !== run) return;
+    try {
+      await rpc.call("turn/steer", { threadId: run.threadId, expectedTurnId: turnId, input: [{ type: "text", text, text_elements: [] }] }, 10_000);
+    } catch (err) {
+      this.opts.log(`[codex] turn/steer failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 }
 

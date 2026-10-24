@@ -8,6 +8,7 @@ import { EventHub } from "../src/server/hub.js";
 import { peerToolInput, peerToolName, toolResultDiff } from "../src/server/runtime/claude/normalize.js";
 import { isSandboxNetworkBlock, isTestCommand, normalizeItem, TestEvidence } from "../src/server/runtime/codex/normalize.js";
 import { CodexAdapter, turnStartParams } from "../src/server/runtime/codex/adapter.js";
+import { ClaudeCodeAdapter } from "../src/server/runtime/claude/adapter.js";
 import { RuntimeSet } from "../src/server/runtime/set.js";
 import { Transcript } from "../src/server/runtime/transcript.js";
 import { PeerService } from "../src/server/service.js";
@@ -126,7 +127,7 @@ describe("multiple runtimes", () => {
     expect(opencode.prompts).toHaveLength(0);
     expect(claude.lastPrompt().input.system).toContain("mcp__peer__checkpoint");
     expect(claude.lastPrompt().input.gate).toBe("engage");
-    const blocked = await service.engine.evaluateTool(b.runtimeSessionId, "edit", { filePath: "x" });
+    const blocked = await service.engine.checkTool(b.runtimeSessionId, "edit", { filePath: "x" });
     expect(blocked.allow).toBe(false);
     expect(!blocked.allow && blocked.reason).toContain("mcp__peer__checkpoint");
 
@@ -247,7 +248,7 @@ describe("Codex turns whose work was not tested", () => {
     const adapter = new CodexAdapter({ storage: store, log: () => {} } as unknown as ConstructorParameters<typeof CodexAdapter>[0]);
     const internals = adapter as unknown as { runs: Map<string, unknown>; byThread: Map<string, string>; onNotification(n: { method: string; params: Record<string, unknown> }): void };
     internals.byThread.set("th", "s1");
-    internals.runs.set("s1", { sessionId: "s1", threadId: "th", directory: "/w", turnId: "t1", messageId: "a1", abort: new AbortController(), approvals: new Map(), filePaths: new Map(), declined: new Map(), testEvidence: new TestEvidence(), snapshots: Promise.resolve(), startTree: null, preTestTrees: new Map() });
+    internals.runs.set("s1", { sessionId: "s1", threadId: "th", directory: "/w", turnId: "t1", messageId: "a1", abort: new AbortController(), approvals: new Map(), fileChanges: new Map(), declined: new Map(), testEvidence: new TestEvidence(), snapshots: Promise.resolve(), startTree: null, preTestTrees: new Map() });
     (adapter as unknown as { transcript(id: string): Transcript }).transcript("s1").startAssistantMessage("a1");
     internals.onNotification({ method: "item/completed", params: { threadId: "th", turnId: "t1", item: cmd("npm test", "failed", 1, EPERM) } });
     internals.onNotification({ method: "turn/completed", params: { threadId: "th", turnId: "t1", turn: { status: "completed" } } });
@@ -407,7 +408,7 @@ describe("Codex code changes made through the shell", () => {
     const internals = adapter as unknown as Internals;
     const responses: unknown[] = [];
     internals.rpc = { alive: true, respond: (_id: number, result: unknown) => responses.push(result), respondError: () => {} };
-    const run: Record<string, unknown> = { sessionId: "s1", threadId: "th", directory: repo, turnId: "t1", messageId: "a1", abort: new AbortController(), approvals: new Map(), filePaths: new Map(), declined: new Map(), testEvidence: new TestEvidence(), snapshots: Promise.resolve(), preTestTrees: new Map() };
+    const run: Record<string, unknown> = { sessionId: "s1", threadId: "th", directory: repo, turnId: "t1", messageId: "a1", abort: new AbortController(), approvals: new Map(), fileChanges: new Map(), declined: new Map(), testEvidence: new TestEvidence(), snapshots: Promise.resolve(), preTestTrees: new Map() };
     run.startTree = await internals.snapshot(run);
     internals.byThread.set("th", "s1");
     internals.runs.set("s1", run);
@@ -481,5 +482,100 @@ describe("Codex code changes made through the shell", () => {
       store.close();
       store = new Store(":memory:");
     }
+  });
+});
+
+describe("Codex and decisions Peer detects", () => {
+  let store: Store;
+  beforeEach(() => {
+    store = new Store(":memory:");
+  });
+  afterEach(() => store.close());
+
+  /** A Codex adapter with a turn in progress whose gate answers with `decision`. */
+  function codex(decision: { allow: true } | { allow: false; reason: string; explain?: boolean }) {
+    const checks: { tool: string; args: Record<string, unknown>; signal?: AbortSignal }[] = [];
+    const hooks = {
+      checkTool: async (_s: string, tool: string, args: Record<string, unknown>, signal?: AbortSignal) => {
+        checks.push({ tool, args, signal });
+        return decision;
+      },
+    };
+    const adapter = new CodexAdapter({ storage: store, hooks, log: () => {}, dataDir: "/tmp/unused" } as unknown as ConstructorParameters<typeof CodexAdapter>[0]);
+    type Internals = {
+      rpc: unknown;
+      runs: Map<string, Record<string, unknown>>;
+      byThread: Map<string, string>;
+      onNotification(n: { method: string; params: Record<string, unknown> }): void;
+      onRequest(r: { id: number; method: string; params: Record<string, unknown> }): Promise<void>;
+      transcript(id: string): Transcript;
+    };
+    const internals = adapter as unknown as Internals;
+    const responses: unknown[] = [];
+    const calls: { method: string; params: Record<string, unknown> }[] = [];
+    internals.rpc = {
+      alive: true,
+      respond: (_id: number, result: unknown) => responses.push(result),
+      respondError: () => {},
+      call: async (method: string, params: Record<string, unknown>) => {
+        calls.push({ method, params });
+        return { turnId: "t1" };
+      },
+    };
+    const abort = new AbortController();
+    const run = { sessionId: "s1", threadId: "th", directory: "/ws", turnId: "t1", messageId: "a1", abort, approvals: new Map(), fileChanges: new Map(), declined: new Map(), testEvidence: new TestEvidence(), snapshots: Promise.resolve(), preTestTrees: new Map(), startTree: null };
+    internals.byThread.set("th", "s1");
+    internals.runs.set("s1", run);
+    internals.transcript("s1").startAssistantMessage("a1");
+    return { internals, checks, responses, calls, abort };
+  }
+
+  const change = { path: "/ws/package.json", kind: { type: "update", move_path: null }, diff: '@@ -1 +1 @@\n-{}\n+{"dependencies":{"zod":"^4"}}' };
+
+  it("gives the gate the file change's diffs and the run's abort signal", async () => {
+    const { internals, checks, responses, abort } = codex({ allow: true });
+    internals.onNotification({ method: "item/started", params: { threadId: "th", turnId: "t1", item: { type: "fileChange", id: "f1", status: "inProgress", changes: [change] } } });
+    await internals.onRequest({ id: 1, method: "item/fileChange/requestApproval", params: { threadId: "th", turnId: "t1", itemId: "f1" } });
+    expect(checks[0]).toMatchObject({ tool: "apply_patch", args: { files: ["/ws/package.json"], changes: [change] } });
+    expect(checks[0]!.signal).toBe(abort.signal);
+    expect(responses.at(-1)).toEqual({ decision: "accept" });
+  });
+
+  it("a call declined because of the developer's decision is explained to the model with turn/steer", async () => {
+    const reason = "Peer collaboration: the developer decided against it.";
+    const { internals, responses, calls, checks } = codex({ allow: false, reason, explain: true });
+    await internals.onRequest({ id: 1, method: "item/commandExecution/requestApproval", params: { threadId: "th", turnId: "t1", itemId: "c1", command: "npm install moment", cwd: "/ws" } });
+    expect(responses.at(-1)).toEqual({ decision: "decline" });
+    // The gate sees where Codex runs the command (review F3).
+    expect(checks[0]).toMatchObject({ tool: "bash", args: { command: "npm install moment", cwd: "/ws" } });
+    await new Promise((r) => setImmediate(r));
+    expect(calls).toEqual([{ method: "turn/steer", params: { threadId: "th", expectedTurnId: "t1", input: [{ type: "text", text: reason, text_elements: [] }] } }]);
+  });
+
+  it("an ordinary gate denial is not steered (the policy already explains the gate)", async () => {
+    const { internals, calls } = codex({ allow: false, reason: "locked" });
+    await internals.onRequest({ id: 1, method: "item/commandExecution/requestApproval", params: { threadId: "th", turnId: "t1", itemId: "c1", command: "touch x", cwd: "/ws" } });
+    await new Promise((r) => setImmediate(r));
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("Claude Code gate hook and decisions Peer detects", () => {
+  it("waits on the gate with a signal that fires when the run stops, and passes the reason on", async () => {
+    let seen: AbortSignal | undefined;
+    const hooks = {
+      checkTool: async (_s: string, _t: string, _a: unknown, signal?: AbortSignal) => {
+        seen = signal;
+        return { allow: false as const, reason: "Peer collaboration: not now", explain: true };
+      },
+    };
+    const adapter = new ClaudeCodeAdapter({ hooks, log: () => {} } as unknown as ConstructorParameters<typeof ClaudeCodeAdapter>[0]);
+    const run = { abort: new AbortController() };
+    const hook = (adapter as unknown as { gateHook(s: string, r: unknown): (i: unknown, id: string | undefined, o: { signal: AbortSignal }) => Promise<unknown> }).gateHook("s1", run);
+    const out = await hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "npm install zod" } }, "tu1", { signal: new AbortController().signal });
+    expect(out).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Peer collaboration: not now" } });
+    expect(seen!.aborted).toBe(false);
+    run.abort.abort();
+    expect(seen!.aborted).toBe(true);
   });
 });

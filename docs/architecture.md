@@ -36,6 +36,7 @@ Peer connects to coding agents the way [T3 Code](https://github.com/pingdotgg/t3
 | `src/server/collaboration/policies.ts` | `CollaborationPolicy` per mode, as **data**: allowed checkpoint categories, budget, default gate, guidance. `resolveEffectivePolicy(mode, intent, …)` applies one-shot intents. |
 | `src/server/collaboration/engine.ts` | `CollaborationEngine`: plans each turn (policy → system prompt + gate), evaluates every tool call against the gate, opens/declines/awaits/resolves/cancels checkpoints, resumes interrupted ones, recovers after restarts. |
 | `src/server/collaboration/prompt.ts` | Composes per-turn instructions from the effective policy. |
+| `src/server/collaboration/decisions.ts` | Detects consequential decisions (today: new dependencies) in a tool call's arguments before it runs: installer commands, and manifest edits through edit/write/patch tools (OpenCode, Claude Code and Codex argument shapes). Pure, given a file reader. |
 | `src/server/collaboration/tool-classification.ts` | Conservative read-only vs mutating classification (including shell commands). Shared with the plugin. |
 | `src/server/runtime/adapter.ts` | `AgentRuntimeAdapter`: the only interface the engine, service and API use. `RuntimeHooks`: the engine's gate and checkpoint functions for in-process adapters. |
 | `src/server/runtime/set.ts` | `RuntimeSet`: the adapters by kind. Each session is bound to one runtime (`sessions.runtime`). |
@@ -56,8 +57,9 @@ Peer connects to coding agents the way [T3 Code](https://github.com/pingdotgg/t3
 2. If the agent is blocked on a checkpoint, the message **answers that checkpoint** instead of starting a turn.
 3. Otherwise the engine resolves the effective policy and records a `turn` with its gate (`open` | `engage` | `hold`). It then calls `session.promptAsync` with the composed policy in the per-prompt `system` field and disables OpenCode's generic `question` tool. The policy rides on **every** prompt, so it always applies; we do not depend on a skill being loaded.
 4. Before every tool call, the plugin's `tool.execute.before` asks `/bridge/tool-check`. Read-only tools pass; mutating tools are rejected with an explanation while the gate is locked. Subagent sessions resolve to their parent.
-5. When the agent calls `peer_checkpoint`, the engine either declines it by policy (wrong category for the mode, or budget spent; recorded and shown) or opens it. If opened, the plugin long-polls `/bridge/checkpoints/:id/wait` until the developer resolves it. The answer is returned as the tool result; engaging unlocks an `engage` gate.
-6. Runtime events (text deltas, tool states, permissions, status) are normalized and streamed to the UI over SSE. On reconnect the UI re-fetches a full snapshot.
+5. If the gate is open and the call carries a decision Peer detects (`decisions.ts`), the engine checks what the developer already decided in this session (its own earlier checkpoints, and the developer's words in messages, answers, chosen options and approved plans). An undecided one is noted (Focus, "Just do it") or held on a Peer-opened checkpoint (`source: "peer"`): the bridge answers `{ wait: <id> }` and the plugin long-polls `/bridge/tool-check/:id/wait`; in-process adapters wait in `engine.checkTool` with the run's abort signal (Claude Code's `PreToolUse` hook has a 24-hour timeout for this). The developer's response becomes allow or a rejection whose reason reaches the agent (Codex: `turn/steer`).
+6. When the agent calls `peer_checkpoint`, the engine either declines it by policy (wrong category for the mode, or budget spent; recorded and shown) or opens it. If opened, the plugin long-polls `/bridge/checkpoints/:id/wait` until the developer resolves it. The answer is returned as the tool result; engaging unlocks an `engage` gate.
+7. Runtime events (text deltas, tool states, permissions, status) are normalized and streamed to the UI over SSE. On reconnect the UI re-fetches a full snapshot.
 
 ## Runtime integration details
 
@@ -113,7 +115,8 @@ Without secrets, CI builds unsigned apps and says so. When a certificate is pres
 
 `collaboration_events` is an append-only log per session:
 - `turn.started` (mode, intent, gate, text)
-- `checkpoint.opened` / `declined` / `resolved` (category, question, the developer's action and answer)
+- `checkpoint.opened` / `declined` / `resolved` (category, question, the developer's action and answer; `source: "peer"` for decisions Peer detected)
+- `decision.noted`, `decision.reused` (a detected decision recorded without asking, or one already decided)
 - `gate.blocked`, `mode.changed`, `permission.*`, `runtime.error`
 
 Together with the runtime transcript, this is the capture point for conversation-derived learning. See [roadmap.md](roadmap.md). No learning data model is built yet, on purpose.

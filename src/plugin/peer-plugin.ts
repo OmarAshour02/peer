@@ -94,9 +94,12 @@ export const PeerCollaboration: Plugin = async () => {
 
     "tool.execute.before": async (input, output) => {
       if (input.tool === "peer_checkpoint" || isReadOnlyTool(input.tool, output.args)) return;
-      let decision: { allow: boolean; reason?: string };
+      type Check = { allow: boolean; reason?: string } | { wait: string };
+      let decision: Check;
       try {
-        decision = await bridge("/bridge/tool-check", { sessionId: input.sessionID, tool: input.tool, args: output.args });
+        decision = await bridge<Check>("/bridge/tool-check", { sessionId: input.sessionID, tool: input.tool, args: output.args });
+        // Peer holds the call on a checkpoint until the developer responds (Stop cancels it).
+        while ("wait" in decision) decision = await bridge<Check>(`/bridge/tool-check/${decision.wait}/wait`, { timeoutMs: WAIT_MS });
       } catch (err) {
         // Fail closed: if Peer cannot be reached, do not let a mutating tool run unchecked.
         throw new Error(`Peer collaboration gate unavailable (${String(err)}); "${input.tool}" was not run.`);

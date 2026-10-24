@@ -92,7 +92,7 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
   // In-process runtimes reach the collaboration engine directly; the service exists by the time
   // any agent runs, so these are bound late.
   const hooks: RuntimeHooks = {
-    checkTool: (sessionId, tool, args) => service!.engine.evaluateTool(sessionId, tool, args),
+    checkTool: (sessionId, tool, args, signal) => service!.engine.checkTool(sessionId, tool, args, signal),
     checkpoint: (sessionId, callId, request, signal) => service!.engine.runCheckpoint(sessionId, callId, request, signal),
   };
   const runtimes = new RuntimeSet([

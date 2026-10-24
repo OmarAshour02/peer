@@ -84,6 +84,16 @@ export function createApp(deps: AppDeps): Hono {
     const body = await c.req.json<{ sessionId: string; tool: string; args: unknown }>();
     return c.json(await service.engine.evaluateTool(body.sessionId, body.tool, body.args));
   });
+  // A call Peer holds on a checkpoint: long-poll until the developer responds.
+  bridge.post("/tool-check/:id/wait", async (c) => {
+    const { timeoutMs } = await c.req.json<{ timeoutMs?: number }>();
+    try {
+      const decision = await service.engine.waitForToolDecision(c.req.param("id"), Math.min(Math.max(timeoutMs ?? 25_000, 1000), 60_000));
+      return c.json(decision ?? { wait: c.req.param("id") });
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
   bridge.post("/checkpoints", async (c) => {
     try {
       const body = await c.req.json<{ sessionId: string; callId: string | null; request: Record<string, unknown> }>();
