@@ -157,6 +157,8 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
 export function PermissionCard({ request }: { request: PermissionRequest }) {
   const { api, busy, run } = useAct();
   const reply = (r: PermissionReply) => run(() => api!.replyPermission(request.id, r));
+  // Claude Code says what "Always allow" saves; it is often narrower than it sounds (one exact command).
+  const always = Array.isArray(request.metadata.always) ? (request.metadata.always as { grant: string; scope: string }[]) : null;
   return (
     <div className="my-3 rounded-lg border border-warn/60 bg-warn/5 px-4 py-3">
       <div className="text-[11px] uppercase tracking-wider text-warn">Permission needed · {request.permission}</div>
@@ -165,13 +167,25 @@ export function PermissionCard({ request }: { request: PermissionRequest }) {
         <Btn primary disabled={busy} onClick={() => reply("once")}>
           Allow once
         </Btn>
-        <Btn disabled={busy} onClick={() => reply("always")}>
-          Always allow
-        </Btn>
+        {always?.length !== 0 && (
+          <Btn disabled={busy} onClick={() => reply("always")}>
+            Always allow
+          </Btn>
+        )}
         <Btn disabled={busy} onClick={() => reply("reject")}>
           Reject
         </Btn>
       </div>
+      {always && always.length > 0 && (
+        <div className="mt-2 text-[11px] text-faint">
+          <span className="text-muted">Always allow saves:</span>
+          {always.map((a) => (
+            <div key={`${a.grant}|${a.scope}`} className="mt-0.5 break-all">
+              <code className="font-mono text-muted">{a.grant}</code> · {a.scope}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

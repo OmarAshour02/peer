@@ -51,6 +51,12 @@ interface SessionState {
   /** Workspace git tree when the session first ran, for the Changes panel. */
   baseline?: string | null;
   titled?: boolean;
+  /**
+   * "Always allow" grants Claude Code scoped to its session (e.g. reads in a directory outside the
+   * workspace). Each Peer turn is a new Claude Code query, which would forget them, so Peer keeps
+   * them for the Peer session and passes them to every turn.
+   */
+  sessionGrants?: { rules: string[]; directories: string[] };
 }
 
 interface PendingPermission {
@@ -292,6 +298,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       const pending = run.permissions.get(requestId);
       if (!pending) continue;
       run.permissions.delete(requestId);
+      if (reply === "always") this.keepSessionGrants(pending.request.sessionId, pending.suggestions ?? []);
       pending.resolve(
         reply === "reject"
           ? { behavior: "deny", message: "The developer rejected this action." }
@@ -301,6 +308,16 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       return;
     }
     throw new Error("Unknown or expired permission request");
+  }
+
+  /** Remember the session-scoped part of an "Always allow" for later turns of this Peer session. */
+  private keepSessionGrants(sessionId: string, suggestions: PermissionUpdate[]) {
+    const grants = sessionGrants(suggestions);
+    if (grants.rules.length === 0 && grants.directories.length === 0) return;
+    const kept = this.state(sessionId).sessionGrants ?? { rules: [], directories: [] };
+    this.saveState(sessionId, {
+      sessionGrants: { rules: [...new Set([...kept.rules, ...grants.rules])], directories: [...new Set([...kept.directories, ...grants.directories])] },
+    });
   }
 
   async listToolIds(): Promise<string[]> {
@@ -349,6 +366,9 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
           mcpServers: { peer: this.checkpointServer(sessionId, run) },
           // Peer checkpoints replace Claude Code's own question tool.
           disallowedTools: ["AskUserQuestion"],
+          // "Always allow" grants the developer gave for this session in earlier turns.
+          ...(state.sessionGrants?.rules.length ? { allowedTools: state.sessionGrants.rules } : {}),
+          ...(state.sessionGrants?.directories.length ? { additionalDirectories: state.sessionGrants.directories } : {}),
           // The gate can hold a call on a Peer checkpoint until the developer responds, so the hook
           // gets a human-scale timeout (seconds); Stop aborts the wait through the run's signal.
           hooks: { PreToolUse: [{ hooks: [this.gateHook(sessionId, run)], timeout: GATE_HOOK_TIMEOUT_S }] },
@@ -449,7 +469,8 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
           sessionId,
           permission: peerToolName(toolName),
           patterns: [pattern],
-          metadata: { tool: toolName, input: args },
+          // What "Always allow" would save, and where, so the developer sees its scope.
+          metadata: { tool: toolName, input: args, always: describeSuggestions(suggestions ?? []) },
         };
         run.permissions.set(request.id, { request, input, suggestions, resolve });
         signal.addEventListener("abort", () => {
@@ -578,4 +599,39 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       // keep the prompt-derived title
     }
   }
+}
+
+/** A permission rule in Claude Code's settings syntax, e.g. `Bash(npm test:*)` or `Read(//src/**)`. */
+function ruleString(rule: { toolName: string; ruleContent?: string }): string {
+  return rule.ruleContent === undefined ? rule.toolName : `${rule.toolName}(${rule.ruleContent})`;
+}
+
+/** The session-scoped "allow" part of Claude Code's permission suggestions. */
+export function sessionGrants(suggestions: PermissionUpdate[]): { rules: string[]; directories: string[] } {
+  const rules: string[] = [];
+  const directories: string[] = [];
+  for (const s of suggestions) {
+    if (s.destination !== "session") continue;
+    if (s.type === "addRules" && s.behavior === "allow") rules.push(...s.rules.map(ruleString));
+    if (s.type === "addDirectories") directories.push(...s.directories);
+  }
+  return { rules, directories };
+}
+
+const SCOPES: Record<string, string> = {
+  session: "this Peer session",
+  localSettings: "this project, on this machine",
+  projectSettings: "this project, for everyone",
+  userSettings: "all your projects",
+  cliArg: "this turn",
+};
+
+/** What "Always allow" saves, for the permission card: `{ grant, scope }` per rule or directory. */
+export function describeSuggestions(suggestions: PermissionUpdate[]): { grant: string; scope: string }[] {
+  return suggestions.flatMap((s) => {
+    const scope = SCOPES[s.destination] ?? s.destination;
+    if (s.type === "addRules" && s.behavior === "allow") return s.rules.map((r) => ({ grant: ruleString(r), scope }));
+    if (s.type === "addDirectories") return s.directories.map((d) => ({ grant: `files in ${d}`, scope }));
+    return [];
+  });
 }
