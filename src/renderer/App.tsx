@@ -118,6 +118,7 @@ export function App() {
               <span className="text-[12px] text-faint">{RUNTIME_UI[snapshot.session.runtime].label}</span>
               <span className={`text-[12px] ${MODE_UI[snapshot.session.mode].color}`}>{MODE_UI[snapshot.session.mode].label}</span>
               {snapshot.session.runtime === "codex" && workspace && <SandboxNetworkToggle workspaceId={workspace.id} on={workspace.sandboxNetwork} />}
+              {snapshot.session.runtime === "claude" && <AutoApprovalsToggle sessionId={snapshot.session.id} on={snapshot.session.autoApprovals} />}
               <UndoButton />
               <button onClick={() => setShowChanges(!showChanges)} className="text-[12px] text-faint hover:text-fg">
                 {showChanges ? "Hide changes" : "Show changes"}
@@ -164,6 +165,35 @@ function SandboxNetworkToggle({ workspaceId, on }: { workspaceId: string; on: bo
       className={`text-[12px] ${on ? "text-warn" : "text-faint hover:text-fg"}`}
     >
       Network: {on ? "on" : "off"}
+    </button>
+  );
+}
+
+/** Claude Code's auto mode: its classifier settles permission prompts and asks only when unsure. */
+function AutoApprovalsToggle({ sessionId, on }: { sessionId: string; on: boolean }) {
+  const api = usePeer((s) => s.api);
+  async function toggle() {
+    if (!api) return;
+    try {
+      // The server emits session.updated, which refreshes the header.
+      await api.updateSession(sessionId, { autoApprovals: !on });
+    } catch (err) {
+      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return (
+    <button
+      onClick={() => void toggle()}
+      role="switch"
+      aria-checked={on}
+      title={
+        on
+          ? "Claude Code's classifier approves or denies permission prompts in this session (including access outside the project) and asks you only when unsure. Destructive commands and Peer's collaboration rules still come to you. Applies from the next turn."
+          : "Permission prompts in this session come to you. Turn on to let Claude Code's classifier settle them, including access outside the project; destructive commands still ask. Applies from the next turn."
+      }
+      className={`text-[12px] ${on ? "text-warn" : "text-faint hover:text-fg"}`}
+    >
+      Auto approvals: {on ? "on" : "off"}
     </button>
   );
 }

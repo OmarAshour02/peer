@@ -88,6 +88,45 @@ describe("Claude Code 'Always allow'", () => {
     calls.at(-1)!.end();
   });
 
+  it("auto approvals switch Claude Code to its auto permission mode; otherwise edits are pre-approved", async () => {
+    const adapter = new ClaudeCodeAdapter({ env: {}, storage: store, hooks: { checkTool: async () => ({ allow: true }), checkpoint: async () => "" }, dataDir: join(dir, ".peer"), log: () => {} });
+    Object.assign(adapter as object, { current: { state: "ready" }, binary: "/usr/bin/false" });
+    await adapter.prompt(dir, "s1", { text: "a", system: "", gate: "open" });
+    expect(calls[0]!.options.permissionMode).toBe("acceptEdits");
+    calls.at(-1)!.end();
+    await vi.waitFor(() => expect((adapter as unknown as { runs: Map<string, unknown> }).runs.size).toBe(0));
+    await adapter.prompt(dir, "s1", { text: "b", system: "", gate: "open", autoApprovals: true });
+    expect(calls[1]!.options.permissionMode).toBe("auto");
+    calls.at(-1)!.end();
+  });
+
+  it("with auto approvals, Peer's hook still denies gated calls, asks for destructive ones, and stops with the run", async () => {
+    let seen: AbortSignal | undefined;
+    const hooks = {
+      checkTool: async (_s: string, tool: string, _a: unknown, signal?: AbortSignal) => {
+        seen = signal;
+        return tool === "write" ? { allow: false as const, reason: "Peer collaboration gate: locked" } : { allow: true as const };
+      },
+      checkpoint: async () => "",
+    };
+    const adapter = new ClaudeCodeAdapter({ env: {}, storage: store, hooks, dataDir: join(dir, ".peer"), log: () => {} });
+    Object.assign(adapter as object, { current: { state: "ready" }, binary: "/usr/bin/false" });
+    await adapter.prompt(dir, "s1", { text: "a", system: "", gate: "open", autoApprovals: true });
+    const options = calls[0]!.options as { permissionMode: string; hooks: { PreToolUse: { hooks: ((i: unknown, id: string, o: { signal: AbortSignal }) => Promise<unknown>)[] }[] } };
+    expect(options.permissionMode).toBe("auto");
+    const hook = options.hooks.PreToolUse[0]!.hooks[0]!;
+    const run = (tool_name: string, tool_input: unknown) => hook({ hook_event_name: "PreToolUse", tool_name, tool_input }, "tu", { signal: new AbortController().signal });
+
+    expect(await run("Write", { file_path: "a.js", content: "x" })).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Peer collaboration gate: locked" } });
+    expect(await run("Bash", { command: "rm -rf build" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "ask" } });
+    expect(await run("Bash", { command: "git push origin main" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "ask" } });
+    expect(await run("Bash", { command: "ls" })).toEqual({});
+    // Stopping the run cancels whatever the gate is waiting on.
+    expect(seen!.aborted).toBe(false);
+    await adapter.abort(dir, "s1");
+    expect(seen!.aborted).toBe(true);
+  });
+
   it("'Allow once' keeps nothing", async () => {
     const adapter = new ClaudeCodeAdapter({ env: {}, storage: store, hooks: { checkTool: async () => ({ allow: true }), checkpoint: async () => "" }, dataDir: join(dir, ".peer"), log: () => {} });
     Object.assign(adapter as object, { current: { state: "ready" }, binary: "/usr/bin/false" });

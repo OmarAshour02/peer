@@ -100,7 +100,7 @@ export class PeerService {
     return session;
   }
 
-  updateSession(sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string }): PeerSession {
+  updateSession(sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string; autoApprovals?: boolean }): PeerSession {
     let session = this.requireSession(sessionId);
     if (patch.mode) session = this.engine.setMode(sessionId, patch.mode);
     if (patch.title !== undefined) {
@@ -109,7 +109,11 @@ export class PeerService {
       session = this.store.renameSession(sessionId, title.slice(0, 200));
     }
     if (patch.model !== undefined) session = this.store.updateSession(sessionId, { model: patch.model });
-    if (patch.model !== undefined || patch.title !== undefined) this.hub.emit({ type: "session.updated", session });
+    if (patch.autoApprovals !== undefined && patch.autoApprovals !== session.autoApprovals) {
+      session = this.store.updateSession(sessionId, { autoApprovals: patch.autoApprovals });
+      this.store.logEvent(sessionId, "auto_approvals.changed", { on: patch.autoApprovals });
+    }
+    if (patch.model !== undefined || patch.title !== undefined || patch.autoApprovals !== undefined) this.hub.emit({ type: "session.updated", session });
     return session;
   }
 

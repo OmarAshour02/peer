@@ -67,6 +67,23 @@ describe("sessions and modes", () => {
     expect(runtime.lastPrompt().input.tools).toEqual({ question: false });
   });
 
+  it("auto approvals are off by default, per session, and reach the runtime from the next turn", async () => {
+    const s = await newSession();
+    expect(s.autoApprovals).toBe(false);
+    await service.send(s.id, "first");
+    expect(runtime.lastPrompt().input.autoApprovals).toBe(false);
+    idle(s);
+    service.updateSession(s.id, { autoApprovals: true });
+    expect(store.getSession(s.id)!.autoApprovals).toBe(true);
+    expect(events.some((e) => e.type === "session.updated" && e.session.autoApprovals)).toBe(true);
+    expect(store.listEvents(s.id).some((e) => e.type === "auto_approvals.changed" && e.payload.on === true)).toBe(true);
+    await service.send(s.id, "second");
+    expect(runtime.lastPrompt().input.autoApprovals).toBe(true);
+    // Another session is unaffected.
+    const other = await newSession();
+    expect(other.autoApprovals).toBe(false);
+  });
+
   it("refuses a new message while the agent is working", async () => {
     const s = await newSession();
     await service.send(s.id, "task");

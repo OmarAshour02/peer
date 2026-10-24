@@ -88,3 +88,17 @@ describe("OpenCode plugin and the bridge", () => {
     await expect(call).rejects.toThrow(/question was cancelled/);
   });
 });
+
+describe("session API", () => {
+  it("toggles auto approvals and rejects anything but a boolean", async () => {
+    const app = createApp({ service, hub: new EventHub(), apiToken: "api", bridgeToken: "bridge-token", allowedOrigins: [] });
+    const ws = service.addWorkspace(dir);
+    const s = await service.createSession(ws.id, { mode: "collaborate" });
+    const patch = (body: unknown) => app.request(`/api/sessions/${s.id}`, { method: "PATCH", headers: { authorization: "Bearer api", "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect((await patch({ autoApprovals: "yes" })).status).toBe(400);
+    const res = await patch({ autoApprovals: true });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { autoApprovals: boolean }).autoApprovals).toBe(true);
+    expect(store.getSession(s.id)!.autoApprovals).toBe(true);
+  });
+});

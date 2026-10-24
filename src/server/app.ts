@@ -316,13 +316,15 @@ export function createApp(deps: AppDeps): Hono {
   });
   api.patch("/sessions/:id", async (c) => {
     try {
-      const body = await c.req.json<{ mode?: unknown; model?: unknown; title?: unknown }>();
+      const body = await c.req.json<{ mode?: unknown; model?: unknown; title?: unknown; autoApprovals?: unknown }>();
       if (body.mode !== undefined && !isMode(body.mode)) return c.json({ error: "Unknown mode" }, 400);
+      if (body.autoApprovals !== undefined && typeof body.autoApprovals !== "boolean") return c.json({ error: "autoApprovals must be true or false" }, 400);
       return c.json(
         service.updateSession(c.req.param("id"), {
           mode: body.mode as CollaborationModeId | undefined,
           model: parseModel(body.model),
           title: typeof body.title === "string" ? body.title : undefined,
+          autoApprovals: body.autoApprovals as boolean | undefined,
         }),
       );
     } catch (err) {

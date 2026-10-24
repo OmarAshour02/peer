@@ -141,6 +141,12 @@ export interface PeerSession {
   title: string;
   mode: CollaborationModeId;
   model: ModelRef | null;
+  /**
+   * Let the runtime settle its own permission prompts where it can (Claude Code's auto mode: a
+   * classifier approves or denies, and asks only when unsure). Peer's collaboration gate and
+   * destructive-command approvals still apply. Off by default.
+   */
+  autoApprovals: boolean;
   createdAt: number;
   updatedAt: number;
 }

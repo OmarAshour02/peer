@@ -360,8 +360,10 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
           // The developer's own Claude Code settings, CLAUDE.md files, MCP servers and permission rules apply.
           settingSources: ["user", "project", "local"],
           // File edits inside the workspace don't prompt (as in Peer's other runtimes); Peer's gate
-          // still decides whether they may happen, and other approvals reach the developer.
-          permissionMode: "acceptEdits",
+          // still decides whether they may happen, and other approvals reach the developer. With
+          // auto approvals, Claude Code's classifier settles prompts and asks only when unsure;
+          // Peer's PreToolUse hook (gate, destructive-command ask) runs first either way.
+          permissionMode: input.autoApprovals ? "auto" : "acceptEdits",
           includePartialMessages: true,
           mcpServers: { peer: this.checkpointServer(sessionId, run) },
           // Peer checkpoints replace Claude Code's own question tool.
