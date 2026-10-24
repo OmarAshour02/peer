@@ -122,6 +122,11 @@ const MIGRATIONS: string[] = [
   -- The developer named the session; runtime-generated titles no longer replace it.
   ALTER TABLE sessions ADD COLUMN titled_by_developer INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Checkpoints Peer opened itself for a decision it detected in a tool call (model-independent).
+  ALTER TABLE checkpoints ADD COLUMN source TEXT NOT NULL DEFAULT 'agent';
+  ALTER TABLE checkpoints ADD COLUMN decision TEXT;
+  `,
 ];
 
 type Row = Record<string, unknown>;
@@ -400,6 +405,8 @@ export class Store {
       id: newId("cp"),
       sessionId: input.sessionId,
       turnId: input.turnId,
+      source: input.source,
+      decision: input.decision,
       category: input.category,
       question: input.question,
       context: input.context,
@@ -412,14 +419,16 @@ export class Store {
     };
     this.db
       .prepare(
-        `INSERT INTO checkpoints (id, session_id, turn_id, runtime_call_id, category, question, context, options, recommendation, status, resolution, created_at, resolved_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO checkpoints (id, session_id, turn_id, runtime_call_id, source, decision, category, question, context, options, recommendation, status, resolution, created_at, resolved_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         cp.id,
         cp.sessionId,
         cp.turnId,
         input.runtimeCallId,
+        cp.source,
+        cp.decision ? JSON.stringify(cp.decision) : null,
         cp.category,
         cp.question,
         cp.context,
@@ -549,6 +558,8 @@ function toCheckpoint(r: Row): Checkpoint {
     id: String(r.id),
     sessionId: String(r.session_id),
     turnId: r.turn_id == null ? null : String(r.turn_id),
+    source: r.source === "peer" ? "peer" : "agent",
+    decision: r.decision == null ? null : JSON.parse(String(r.decision)),
     category: r.category as Checkpoint["category"],
     question: String(r.question),
     context: r.context == null ? null : String(r.context),

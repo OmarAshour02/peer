@@ -31,6 +31,18 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
   const resolve = (action: CheckpointAction, extra: { text?: string; option?: string } = {}) =>
     run(() => api!.resolveCheckpoint(cp.id, action, extra));
 
+  // Peer noted a decision it detected without interrupting (Focus, "Just do it").
+  if (cp.status === "auto_resolved" && cp.decision) {
+    return (
+      <div className="my-2 rounded-md border border-dashed border-line px-3 py-2 text-[12px] text-faint">
+        <span className="text-muted">Noted by Peer, not asked:</span> {cp.question}
+        <div className="mt-0.5">
+          {cp.context} {cp.resolution?.note}.
+        </div>
+      </div>
+    );
+  }
+
   if (cp.status === "auto_resolved") {
     return (
       <div className="my-2 rounded-md border border-dashed border-line px-3 py-2 text-[12px] text-faint">
@@ -41,10 +53,14 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
   }
 
   const r = cp.resolution;
+  // Peer paused a tool call itself: the options already say go ahead or not, so skipping the
+  // discussion means the same as going ahead; hints are for Learn's reasoning questions.
+  const peer = cp.source === "peer";
   return (
     <div className={`my-3 rounded-lg border ${open ? "border-accent/60 bg-accent/5" : "border-line bg-raised/40"} px-4 py-3`}>
       <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wider">
-        <span className={open ? "text-accent" : "text-faint"}>{CATEGORY_UI[cp.category]}</span>
+        <span className={open ? "text-accent" : "text-faint"}>{peer ? "Peer paused the agent" : CATEGORY_UI[cp.category]}</span>
+        {peer && <span className="text-faint">· new dependency</span>}
         {cp.status === "pending" && <span className="text-faint">· the agent is waiting for you</span>}
         {cp.status === "interrupted" && <span className="text-warn">· the run ended before you answered; answering resumes it</span>}
         {cp.status === "cancelled" && <span className="text-faint">· cancelled</span>}
@@ -104,13 +120,15 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
                 Give me a hint
               </Btn>
             )}
-            <Btn disabled={busy} onClick={() => resolve("delegate", { text: text || undefined })} title="Let the agent make this call">
+            <Btn disabled={busy} onClick={() => resolve("delegate", { text: text || undefined })} title={peer ? "Let the agent go ahead" : "Let the agent make this call"}>
               You decide
             </Btn>
-            <Btn disabled={busy} onClick={() => resolve("skip", { text: text || undefined })} title="Skip the discussion and implement">
-              Skip to implementation
-            </Btn>
-            {mode !== "learn" && (
+            {!peer && (
+              <Btn disabled={busy} onClick={() => resolve("skip", { text: text || undefined })} title="Skip the discussion and implement">
+                Skip to implementation
+              </Btn>
+            )}
+            {mode !== "learn" && !peer && (
               <Btn disabled={busy} onClick={() => resolve("hint", { text: text || undefined })}>
                 Hint
               </Btn>

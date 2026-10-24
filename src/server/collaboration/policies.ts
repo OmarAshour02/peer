@@ -1,4 +1,4 @@
-import type { CheckpointCategory, CollaborationModeId, GateKind, TurnIntent } from "../../shared/types.js";
+import type { CheckpointCategory, CollaborationModeId, DecisionKind, DetectedDecision, GateKind, TurnIntent } from "../../shared/types.js";
 
 /**
  * A collaboration policy is data, not a prompt. The engine uses it to decide
@@ -17,8 +17,19 @@ export interface CollaborationPolicy {
   defaultGate: GateKind;
   /** Whether the developer can ask for progressive hints on checkpoints. */
   hints: boolean;
+  /**
+   * Decisions Peer detects in tool calls itself, whatever the model asks: the kinds it holds the
+   * call for and asks the developer about (the others are noted in the transcript), and how it asks.
+   */
+  detectedDecisions: DecisionPolicy;
   /** Mode-specific behavioral guidance for the agent. */
   guidance: readonly string[];
+}
+
+export interface DecisionPolicy {
+  ask: readonly DecisionKind[];
+  /** "choice": pick one (go ahead or not). "reasoning": ask for the developer's reasoning first. */
+  style: DetectedDecision["style"];
 }
 
 export const SHARED_PRINCIPLES: readonly string[] = [
@@ -40,6 +51,8 @@ export const POLICIES: Record<CollaborationModeId, CollaborationPolicy> = {
     checkpointBudget: 1,
     defaultGate: "open",
     hints: false,
+    // Focus does not interrupt for these; the decision shows in the transcript.
+    detectedDecisions: { ask: [], style: "choice" },
     guidance: [
       "The developer understands the task and wants execution. Work autonomously on straightforward work.",
       "Do not ask about preferences, style, or choices you can reasonably make yourself; choose sensibly and mention notable choices in your summary.",
@@ -57,6 +70,7 @@ export const POLICIES: Record<CollaborationModeId, CollaborationPolicy> = {
     checkpointBudget: 3,
     defaultGate: "open",
     hints: false,
+    detectedDecisions: { ask: ["dependency"], style: "choice" },
     guidance: [
       "Behave like an experienced engineer pairing with a peer.",
       "Before significant implementation (new modules, data model changes, new dependencies, cross-cutting changes), explore the code, then propose an approach and agree on it with the developer through a checkpoint before editing.",
@@ -74,6 +88,7 @@ export const POLICIES: Record<CollaborationModeId, CollaborationPolicy> = {
     checkpointBudget: 4,
     defaultGate: "engage",
     hints: true,
+    detectedDecisions: { ask: ["dependency"], style: "reasoning" },
     guidance: [
       "The developer is prioritizing their own understanding and skill. You remain a fully capable coding agent.",
       "Before giving a complete solution to a meaningful problem, invite the developer to form a hypothesis or make the key decision. Ask one focused question grounded in this codebase, not a generic quiz.",
@@ -98,6 +113,7 @@ export interface EffectivePolicy {
   askFor: readonly CheckpointCategory[];
   checkpointBudget: number;
   gate: GateKind;
+  decisions: DecisionPolicy;
   intentGuidance: string | null;
 }
 
@@ -130,6 +146,7 @@ export function resolveEffectivePolicy(
         askFor: ["risk"],
         checkpointBudget: 1,
         gate: "open",
+        decisions: { ask: [], style: "choice" },
         intentGuidance:
           "The developer delegated this task: do not ask about approach or preferences. Make sensible decisions, implement, verify, and summarize the decisions you made. Only stop for genuinely risky or irreversible steps.",
       };
@@ -139,6 +156,7 @@ export function resolveEffectivePolicy(
         askFor: policy.askFor,
         checkpointBudget: Math.max(policy.checkpointBudget, 2),
         gate: "hold",
+        decisions: policy.detectedDecisions,
         intentGuidance:
           "The developer wants to discuss before any code changes. Explore the code as needed, then lay out the options, trade-offs, and your recommendation. Do not modify files in this turn.",
       };
@@ -148,6 +166,7 @@ export function resolveEffectivePolicy(
         askFor: policy.askFor,
         checkpointBudget: policy.checkpointBudget,
         gate: "hold",
+        decisions: policy.detectedDecisions,
         intentGuidance:
           "The developer asked for a hint. Give one concise hint that moves them a step forward without revealing the full solution. Do not modify files in this turn.",
       };
@@ -157,6 +176,8 @@ export function resolveEffectivePolicy(
         askFor: ["requirement", "risk"],
         checkpointBudget: 1,
         gate: "open",
+        // A direct answer, not a Socratic question.
+        decisions: { ask: policy.detectedDecisions.ask, style: "choice" },
         intentGuidance:
           "The developer asked for a direct answer. Give the complete answer or solution directly, without Socratic questions, then implement if the request calls for it.",
       };
@@ -166,6 +187,7 @@ export function resolveEffectivePolicy(
         askFor: policy.askFor,
         checkpointBudget: policy.checkpointBudget,
         gate: policy.defaultGate === "engage" && previousTurnAwaitingEngagement ? "open" : policy.defaultGate,
+        decisions: policy.detectedDecisions,
         intentGuidance: null,
       };
   }

@@ -7,6 +7,7 @@ import {
   type CheckpointCategory,
   type CheckpointOption,
   type CollaborationModeId,
+  type DetectedDecision,
   type GateState,
   type PeerEvent,
   type PeerSession,
@@ -22,6 +23,7 @@ import type { RuntimeEvent } from "../runtime/adapter.js";
 import { changedFiles, restoreFiles, snapshotWorkspace } from "../runtime/git-snapshot.js";
 import type { RuntimeSet } from "../runtime/set.js";
 import type { Store } from "../store.js";
+import { detectDecision, namesApproved, type Detection } from "./decisions.js";
 import { parseIntent } from "./intent.js";
 import { INTENT_LABELS, getPolicy, resolveEffectivePolicy } from "./policies.js";
 import { composeSystemPrompt } from "./prompt.js";
@@ -45,7 +47,18 @@ export interface CheckpointRequest {
   recommendation?: unknown;
 }
 
-export type ToolDecision = { allow: true } | { allow: false; reason: string };
+/**
+ * `explain`: the agent must be told the reason (runtimes that only report "declined" to the model,
+ * like Codex, send it separately).
+ */
+export type ToolDecision = { allow: true } | { allow: false; reason: string; explain?: boolean };
+
+/** evaluateTool's answer: a decision, or a checkpoint Peer opened that the call waits on. */
+export type ToolCheck = ToolDecision | { wait: string };
+
+/** Options of a Peer-opened "choice" checkpoint. */
+export const DECISION_APPROVE = "Add it";
+export const DECISION_DECLINE = "Don't add it";
 
 export type SendResult =
   | { kind: "turn-started"; turn: Turn }
@@ -363,14 +376,17 @@ export class CollaborationEngine {
     return { kind: turn.gate, locked: false, reason: null };
   }
 
-  /** Called by the runtime plugin before every tool execution. */
-  async evaluateTool(runtimeSessionId: string, tool: string, args: unknown): Promise<ToolDecision> {
+  /**
+   * Called before every tool execution. Returns `{ wait }` when Peer holds the call on a checkpoint
+   * for a decision it detected; the caller then waits with waitForToolDecision (or uses checkTool).
+   */
+  async evaluateTool(runtimeSessionId: string, tool: string, args: unknown): Promise<ToolCheck> {
     if (isReadOnlyTool(tool, args)) return { allow: true };
     const session = await this.sessionForRuntime(runtimeSessionId);
     // Peer owns its runtime: a session it cannot map (e.g. deleted mid-run) gets no write access.
     if (!session) return { allow: false, reason: `Peer collaboration gate: "${tool}" was not run because this session is not an active Peer session.` };
     const gate = this.gateFor(session.id);
-    if (!gate.locked) return { allow: true };
+    if (!gate.locked) return this.checkDecision(session, tool, args);
 
     this.store.logEvent(session.id, "gate.blocked", { tool, reason: gate.reason });
     const how = this.liveCheckpoint(session.id)
@@ -380,6 +396,141 @@ export class CollaborationEngine {
       allow: false,
       reason: `Peer collaboration gate: "${tool}" was not run. ${gate.reason} ${how} Reading and exploring the code is still allowed. Do not try to work around this gate.`,
     };
+  }
+
+  /**
+   * In-process form of the gate (RuntimeHooks.checkTool): evaluateTool, and if Peer holds the call on
+   * a checkpoint, wait for the developer. The signal (the agent run stopping) cancels the checkpoint.
+   */
+  async checkTool(runtimeSessionId: string, tool: string, args: unknown, signal?: AbortSignal): Promise<ToolDecision> {
+    const check = await this.evaluateTool(runtimeSessionId, tool, args);
+    if (!("wait" in check)) return check;
+    const id = check.wait;
+    const onAbort = () => this.cancelCheckpoint(id, "The agent run was stopped");
+    if (signal?.aborted) onAbort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      for (;;) {
+        const decision = await this.waitForToolDecision(id, 60_000);
+        if (decision) return decision;
+      }
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /** Wait for the developer on a held tool call. Null if the timeout elapsed first (wait again). */
+  async waitForToolDecision(checkpointId: string, timeoutMs: number): Promise<ToolDecision | null> {
+    try {
+      if ((await this.waitForCheckpoint(checkpointId, timeoutMs)) === null) return null;
+    } catch (err) {
+      if (!(err instanceof EngineError) || err.status !== 409) throw err;
+    }
+    const cp = this.store.getCheckpoint(checkpointId);
+    if (!cp?.decision) throw new EngineError(`Checkpoint ${checkpointId} does not hold a tool call`, 404);
+    return heldCallDecision(cp, this.hintNumber(cp));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Decisions Peer detects itself
+
+  /**
+   * Model-independent checkpoints: if the tool call carries a decision the mode wants the developer
+   * to make (today: a new dependency), hold it on a Peer-opened checkpoint. Decisions the developer
+   * already made in this session are applied without asking again.
+   */
+  private checkDecision(session: PeerSession, tool: string, args: unknown): ToolCheck {
+    let detected: Detection | null;
+    try {
+      detected = detectDecision(tool, args, this.directoryOf(session));
+    } catch (err) {
+      // A bug in detection must not block every call; it is recorded instead of silent.
+      // (Manifest readers already turn their own failures into "not declared", i.e. ask.)
+      this.store.logEvent(session.id, "decision.detect_failed", { tool, error: err instanceof Error ? err.message : String(err) });
+      detected = null;
+    }
+    if (!detected) return { allow: true };
+
+    const prior = this.priorDecisions(session.id, detected.subjects);
+    const declined = detected.subjects.filter((s) => prior.get(s) === "declined");
+    const undecided = detected.subjects.filter((s) => !prior.has(s));
+    if (declined.length > 0 || undecided.length === 0) {
+      this.store.logEvent(session.id, "decision.reused", { kind: detected.kind, subjects: detected.subjects, declined, tool });
+    }
+    if (declined.length > 0) {
+      return {
+        allow: false,
+        explain: true,
+        reason: `Peer collaboration: the developer already decided not to add ${list(declined)} in this session, so ${detected.action} was not run. Continue without ${declined.length > 1 ? "them" : "it"}. If you think they should reconsider, ask them with ${this.checkpointToolFor(session)}.`,
+      };
+    }
+    if (undecided.length === 0) return { allow: true };
+
+    const turn = this.activeTurn(session.id);
+    const plan = resolveEffectivePolicy(turn?.mode ?? session.mode, turn?.intent ?? "default", false);
+    const decision: DetectedDecision = { ...detected, subjects: undecided, style: plan.decisions.style };
+    const base = { sessionId: session.id, turnId: turn?.id ?? null, runtimeCallId: null, source: "peer" as const, decision };
+
+    if (!plan.decisions.ask.includes(detected.kind)) {
+      const qualifier = plan.intent === "default" ? `${plan.policy.label} mode` : `"${INTENT_LABELS[plan.intent]}"`;
+      const checkpoint = this.store.createCheckpoint({
+        ...base,
+        category: "architecture",
+        question: `New ${undecided.length > 1 ? "dependencies" : "dependency"}: ${list(undecided)}`,
+        context: `The agent ran ${detected.action}.`,
+        options: [],
+        recommendation: null,
+        status: "auto_resolved",
+        resolution: { action: "policy", by: "policy", note: `${qualifier} notes this without interrupting you` },
+      });
+      this.store.logEvent(session.id, "decision.noted", { checkpointId: checkpoint.id, kind: detected.kind, subjects: undecided, tool });
+      this.emit({ type: "checkpoint.updated", checkpoint });
+      return { allow: true };
+    }
+
+    // An earlier question about the same decision that lost its run is replaced by this one.
+    for (const old of this.store.listCheckpoints(session.id)) {
+      if (old.status === "interrupted" && old.decision?.subjects.some((s) => undecided.includes(s))) {
+        const cancelled = this.store.updateCheckpoint(old.id, "cancelled", { action: "cancelled", by: "system", note: "Asked again when the agent retried" });
+        this.emit({ type: "checkpoint.updated", checkpoint: cancelled });
+      }
+    }
+    const checkpoint = this.store.createCheckpoint({ ...base, ...decisionQuestion(decision), recommendation: null, status: "pending", resolution: null });
+    this.live.add(checkpoint.id);
+    this.store.logEvent(session.id, "checkpoint.opened", { checkpointId: checkpoint.id, category: checkpoint.category, question: checkpoint.question, source: "peer", subjects: undecided, tool });
+    this.emit({ type: "checkpoint.updated", checkpoint });
+    this.emit({ type: "gate.updated", sessionId: session.id, gate: this.gateFor(session.id) });
+    return { wait: checkpoint.id };
+  }
+
+  /**
+   * What the developer already decided about each subject in this session, latest signal first:
+   * answers to Peer's own checkpoints, and the developer's own words (messages, answers, chosen
+   * options, approved plans) that name the subject. Subjects with no signal are absent.
+   */
+  private priorDecisions(sessionId: string, subjects: string[]): Map<string, "approved" | "declined"> {
+    const signals: { at: number; subject: string; outcome: "approved" | "declined" }[] = [];
+    const words: { at: number; text: string; choice: boolean }[] = [];
+    for (const e of this.store.listEvents(sessionId)) {
+      if (e.type === "turn.started" && !e.payload.resume && !e.payload.continuation && typeof e.payload.text === "string") words.push({ at: e.createdAt, text: e.payload.text, choice: false });
+    }
+    for (const cp of this.store.listCheckpoints(sessionId)) {
+      const at = cp.resolvedAt ?? cp.createdAt;
+      if (cp.decision) {
+        const outcome = decisionOutcome(cp);
+        if (outcome) for (const subject of cp.decision.subjects) signals.push({ at, subject, outcome });
+      }
+      for (const w of developerWords(cp)) words.push({ at, ...w });
+    }
+    for (const subject of subjects) {
+      for (const w of words) if (namesApproved(w.text, subject, w.choice)) signals.push({ at: w.at, subject, outcome: "approved" });
+    }
+    const latest = new Map<string, { at: number; outcome: "approved" | "declined" }>();
+    for (const s of signals) {
+      const seen = latest.get(s.subject);
+      if (!seen || s.at >= seen.at) latest.set(s.subject, s);
+    }
+    return new Map([...latest].filter(([subject]) => subjects.includes(subject)).map(([subject, s]) => [subject, s.outcome]));
   }
 
   // ---------------------------------------------------------------------------
@@ -419,6 +570,8 @@ export class CollaborationEngine {
         sessionId: session.id,
         turnId: turn?.id ?? null,
         runtimeCallId: callId,
+        source: "agent",
+        decision: null,
         status: "auto_resolved",
         resolution: { action: "policy", by: "policy", note: declined },
       });
@@ -432,6 +585,8 @@ export class CollaborationEngine {
       sessionId: session.id,
       turnId: turn?.id ?? null,
       runtimeCallId: callId,
+      source: "agent",
+      decision: null,
       status: "pending",
       resolution: null,
     });
@@ -532,7 +687,9 @@ export class CollaborationEngine {
       // The run that asked is gone (stop, crash, or restart): resume with a new turn.
       // If the resume cannot start, keep the checkpoint answerable rather than losing the response.
       const session = this.requireSession(cp.sessionId);
-      const resumeText = `Resuming after an interruption. Earlier you asked me (via ${this.checkpointToolFor(session)}): "${cp.question}"\n\n${this.agentOutput(resolved)}`;
+      const resumeText = cp.decision
+        ? `Resuming after an interruption. Before ${cp.decision.action} ran, Peer paused it to ask me about it.\n\n${this.agentOutput(resolved)}`
+        : `Resuming after an interruption. Earlier you asked me (via ${this.checkpointToolFor(session)}): "${cp.question}"\n\n${this.agentOutput(resolved)}`;
       try {
         await this.startTurn(session, resumeText, input.action === "hint" ? "hint" : "default", true);
       } catch (err) {
@@ -570,6 +727,12 @@ export class CollaborationEngine {
           : " Code changes are now unlocked."
         : "";
     if (!r) return "The checkpoint has no response yet.";
+    if (cp.decision) {
+      const decision = heldCallDecision(cp, this.hintNumber(cp));
+      return decision.allow
+        ? `Peer asked the developer about ${what(cp.decision)}, and they approved. Go ahead (run ${cp.decision.action} again); Peer will not ask about it again.`
+        : decision.reason;
+    }
     switch (r.action) {
       case "policy":
         return `Peer did not ask the developer: ${r.note}. Decide yourself${rec}, mention the decision and why in your final summary, and continue.`;
@@ -737,14 +900,15 @@ export class CollaborationEngine {
 
   /**
    * Developer-facing checkpoints used in a turn, including the turn a continuation carries on (one
-   * task, one budget, on every runtime). Risk and hint follow-ups are free.
+   * task, one budget, on every runtime). Risk and hint follow-ups are free, and so are the
+   * checkpoints Peer opens itself: they are not the agent's questions.
    */
   private checkpointsUsed(turnId: string): number {
     const turn = this.store.getTurn(turnId);
     const turnIds = turn?.continuedFrom ? [turnId, turn.continuedFrom] : [turnId];
     return turnIds
       .flatMap((id) => this.store.listCheckpointsForTurn(id))
-      .filter((c) => c.category !== "risk" && c.status !== "auto_resolved" && c.resolution?.action !== "hint").length;
+      .filter((c) => c.source === "agent" && c.category !== "risk" && c.status !== "auto_resolved" && c.resolution?.action !== "hint").length;
   }
 
   private hintNumber(cp: Checkpoint): number {
@@ -819,4 +983,89 @@ function normalizeCheckpointRequest(req: CheckpointRequest): {
     : [];
   const recommendation = typeof req.recommendation === "string" && req.recommendation.trim() ? req.recommendation.trim() : null;
   return { category, question, context, options, recommendation };
+}
+
+// ---------------------------------------------------------------------------
+// Peer-opened checkpoints for detected decisions
+
+function list(subjects: string[]): string {
+  return subjects.map((s) => `\`${s}\``).join(", ");
+}
+
+function what(d: DetectedDecision): string {
+  return `adding ${list(d.subjects)}`;
+}
+
+/** The question Peer asks for a held call, per style. */
+function decisionQuestion(d: DetectedDecision): { category: CheckpointCategory; question: string; context: string; options: CheckpointOption[] } {
+  const plural = d.subjects.length > 1;
+  const detected = `The agent is about to run ${d.action}. Peer detected this itself and paused it before it runs.`;
+  if (d.style === "reasoning") {
+    return {
+      category: "hypothesis",
+      question: `Before the agent adds ${list(d.subjects)}: what do you think this task needs ${plural ? "them" : "it"} for, and is that worth a new dependency here?`,
+      context: `${detected} Answer in your own words and the agent will respond to your reasoning before it continues, or choose "You decide" to let it go ahead.`,
+      options: [],
+    };
+  }
+  return {
+    category: "architecture",
+    question: `Add ${plural ? "new dependencies" : "a new dependency"}: ${list(d.subjects)}?`,
+    context: `${detected} A dependency is a lasting choice (maintenance, security updates, install size).`,
+    options: [
+      { label: DECISION_APPROVE, description: "Run it as planned" },
+      { label: DECISION_DECLINE, description: "The agent continues without it" },
+    ],
+  };
+}
+
+/** Whether the developer's response lets the held call run, and what the agent is told if not. */
+function heldCallDecision(cp: Checkpoint, hint: number): ToolDecision {
+  const d = cp.decision!;
+  const r = cp.resolution;
+  const paused = `Peer paused ${d.action} to ask the developer about ${what(d)}`;
+  const deny = (reason: string): ToolDecision => ({ allow: false, explain: true, reason: `Peer collaboration: ${reason}` });
+  if (!r || r.action === "cancelled") return deny(`${paused}, and the question was cancelled${r?.note ? ` (${r.note})` : ""}. It was not run.`);
+  switch (decisionOutcome(cp)) {
+    case "declined":
+      return deny(`${paused}. They decided against it${r.text ? ` and said: "${r.text}"` : ""}. It was not run. Continue without ${d.subjects.length > 1 ? "them" : "it"}; Peer rejects further attempts in this session unless the developer asks for ${d.subjects.length > 1 ? "them" : "it"}.`);
+    case "approved":
+      // Their words go to the agent first; the retry then runs without asking again.
+      if (!r.text || r.action === "policy") return { allow: true };
+      if (d.style === "reasoning" && r.action === "answer") {
+        return deny(`${paused} first (Learn mode). It was not run yet. Their reasoning: "${r.text}". Before you continue, respond to it in a few sentences: what it gets right and what it misses, grounded in this codebase. Then continue; if ${what(d)} is still right, run it again (Peer will not ask about it again).`);
+      }
+      return deny(`${paused}. It was not run yet. They said: "${r.text}". Act on that. If it approves ${what(d)}, run it again; Peer will not ask about it again.`);
+    default:
+      // A hint: answer it, then try again, and Peer asks again.
+      return deny(`${paused}; they asked for a hint (hint ${hint}${r.text ? `; they added: "${r.text}"` : ""}). It was not run. In your reply, give one short hint that helps them reason about whether ${list(d.subjects)} ${d.subjects.length > 1 ? "are" : "is"} needed here, without giving the answer away. Then run it again; Peer will ask them again.`);
+  }
+}
+
+/** The decision a resolved Peer-opened checkpoint records. Free-text answers count as approval: the agent gets the text first. */
+function decisionOutcome(cp: Checkpoint): "approved" | "declined" | null {
+  const r = cp.resolution;
+  if (!r) return null;
+  if (r.action === "policy") return "approved";
+  if (r.action === "choose") return r.option === DECISION_DECLINE ? "declined" : "approved";
+  if (r.action === "answer" || r.action === "delegate" || r.action === "skip") return "approved";
+  return null;
+}
+
+/**
+ * The developer's own words in an agent-opened checkpoint: their answer, the option they chose, and
+ * what they accepted (the recommendation when they delegated or skipped or picked it, and the plan
+ * of a confirm checkpoint they approved).
+ */
+function developerWords(cp: Checkpoint): { text: string; choice: boolean }[] {
+  const r = cp.resolution;
+  // A Peer checkpoint's outcome is the decision; its text must not count again ("too heavy" on a decline).
+  if (!r || r.by !== "human" || cp.source === "peer") return [];
+  const words = r.text ? [{ text: r.text, choice: false }] : [];
+  // Option labels are explicit choices; the rest is prose that has to ask for the package.
+  if (r.action === "choose" && r.option) words.push({ text: r.option, choice: true });
+  const accepted = r.action === "delegate" || r.action === "skip" || (r.action === "choose" && (r.option === cp.recommendation || cp.options.length === 1));
+  if (accepted && cp.recommendation && r.action !== "choose") words.push({ text: cp.recommendation, choice: true });
+  if (accepted && cp.category === "confirm") words.push({ text: cp.question, choice: false }, { text: cp.context ?? "", choice: false });
+  return words;
 }

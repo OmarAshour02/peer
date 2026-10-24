@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -7,7 +7,7 @@ import { RuntimeSet } from "../src/server/runtime/set.js";
 import { PeerService } from "../src/server/service.js";
 import { Store } from "../src/server/store.js";
 import type { PeerEvent, PeerSession } from "../src/shared/types.js";
-import { CONTINUATION_TEXT } from "../src/server/collaboration/engine.js";
+import { CONTINUATION_TEXT, DECISION_APPROVE, DECISION_DECLINE } from "../src/server/collaboration/engine.js";
 import { FakeRuntime } from "./helpers.js";
 
 let dir: string;
@@ -38,7 +38,7 @@ async function newSession(mode?: PeerSession["mode"]) {
 
 const engine = () => service.engine;
 const idle = (s: PeerSession) => runtime.emit({ type: "session.idle", sessionId: s.runtimeSessionId });
-const write = (s: PeerSession) => engine().evaluateTool(s.runtimeSessionId, "write", { filePath: "x.js" });
+const write = (s: PeerSession) => engine().checkTool(s.runtimeSessionId, "write", { filePath: "x.js" });
 
 describe("sessions and modes", () => {
   it("defaults new sessions to Collaborate, or to the user's preference", async () => {
@@ -80,9 +80,9 @@ describe("collaboration gate", () => {
     await service.send(s.id, "implement rate limiting");
     expect(engine().gateFor(s.id).locked).toBe(true);
     expect((await write(s)).allow).toBe(false);
-    expect((await engine().evaluateTool(s.runtimeSessionId, "bash", { command: "npm install x" })).allow).toBe(false);
-    expect((await engine().evaluateTool(s.runtimeSessionId, "read", { filePath: "a" })).allow).toBe(true);
-    expect((await engine().evaluateTool(s.runtimeSessionId, "bash", { command: "git log -3" })).allow).toBe(true);
+    expect((await engine().checkTool(s.runtimeSessionId, "bash", { command: "npm install x" })).allow).toBe(false);
+    expect((await engine().checkTool(s.runtimeSessionId, "read", { filePath: "a" })).allow).toBe(true);
+    expect((await engine().checkTool(s.runtimeSessionId, "bash", { command: "git log -3" })).allow).toBe(true);
 
     const { checkpoint } = await engine().requestCheckpoint(s.runtimeSessionId, null, {
       category: "hypothesis",
@@ -143,12 +143,12 @@ describe("collaboration gate", () => {
     const s = await newSession("learn");
     await service.send(s.id, "task");
     runtime.parents.set("child_1", s.runtimeSessionId);
-    expect((await engine().evaluateTool("child_1", "edit", {})).allow).toBe(false);
+    expect((await engine().checkTool("child_1", "edit", {})).allow).toBe(false);
   });
 
   it("fails closed for runtime sessions Peer cannot map", async () => {
-    expect((await engine().evaluateTool("unknown", "write", {})).allow).toBe(false);
-    expect((await engine().evaluateTool("unknown", "read", {})).allow).toBe(true);
+    expect((await engine().checkTool("unknown", "write", {})).allow).toBe(false);
+    expect((await engine().checkTool("unknown", "read", {})).allow).toBe(true);
   });
 
   it("deleting a session stops its run, and its tool calls lose write access", async () => {
@@ -442,5 +442,277 @@ describe("runtimes whose sandbox is fixed per turn (Codex)", () => {
     idle(s);
     await flush();
     expect(runtime.prompts).toHaveLength(1);
+  });
+});
+
+describe("decisions Peer detects itself (new dependencies)", () => {
+  beforeEach(() => writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "app", dependencies: { react: "^19.0.0" } })));
+
+  const tick = () => new Promise((r) => setImmediate(r));
+  /** The agent runs an install in-process (Claude Code, Codex): the call waits while Peer holds it. */
+  const install = (s: PeerSession, pkg = "zod", signal?: AbortSignal) => engine().checkTool(s.runtimeSessionId, "bash", { command: `npm install ${pkg}` }, signal);
+  const pending = (s: PeerSession) => store.listCheckpoints(s.id).filter((c) => c.status === "pending");
+  /** Start an install and return the Peer checkpoint it is held on. */
+  async function held(s: PeerSession, pkg = "zod") {
+    const call = install(s, pkg);
+    await tick();
+    const [cp] = pending(s);
+    expect(cp).toBeDefined();
+    return { call, cp: cp! };
+  }
+
+  it("Collaborate holds a new dependency on a checkpoint the agent did not ask for; approving runs it", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "validate the request body");
+    const { call, cp } = await held(s);
+    expect(cp).toMatchObject({ source: "peer", category: "architecture", decision: { kind: "dependency", subjects: ["zod"], style: "choice", action: "`npm install zod`" } });
+    expect(cp.options.map((o) => o.label)).toEqual([DECISION_APPROVE, DECISION_DECLINE]);
+    // While it is held, other changes wait too (parallel tool calls).
+    expect((await write(s)).allow).toBe(false);
+
+    await engine().resolveCheckpoint(cp.id, { action: "choose", option: DECISION_APPROVE });
+    expect(await call).toEqual({ allow: true });
+    // Already decided: the same dependency, again or through a manifest edit, runs without asking.
+    expect(await install(s)).toEqual({ allow: true });
+    const pkg = JSON.stringify({ name: "app", dependencies: { react: "^19.0.0", zod: "^4" } });
+    expect(await engine().checkTool(s.runtimeSessionId, "write", { filePath: "package.json", content: pkg })).toEqual({ allow: true });
+    expect(store.listCheckpoints(s.id)).toHaveLength(1);
+  });
+
+  it("a manifest that crashes its reader still leads to a question, not a silent allow (review F5)", async () => {
+    writeFileSync(join(dir, "pyproject.toml"), '[project]\nname = "\\U00110000"\ndependencies = ["httpx"]\n');
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    expect(await engine().evaluateTool(s.runtimeSessionId, "bash", { command: "pip install httpx" })).toHaveProperty("wait");
+  });
+
+  it("does not interrupt mechanical work", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    for (const command of ["npm install", "npm ci", "npm install react@latest", "npm run build"]) {
+      expect(await engine().checkTool(s.runtimeSessionId, "bash", { command })).toEqual({ allow: true });
+    }
+    expect(await engine().checkTool(s.runtimeSessionId, "edit", { filePath: "src/a.ts", oldString: "a", newString: "b" })).toEqual({ allow: true });
+    expect(store.listCheckpoints(s.id)).toHaveLength(0);
+  });
+
+  it("'Don't add it' rejects the call, and later attempts are rejected without asking again", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "format the dates");
+    const { call, cp } = await held(s, "moment");
+    await engine().resolveCheckpoint(cp.id, { action: "choose", option: DECISION_DECLINE, text: "use Intl.DateTimeFormat" });
+    const decision = await call;
+    expect(decision).toMatchObject({ allow: false, explain: true });
+    expect(decision.allow === false && decision.reason).toMatch(/decided against it and said: "use Intl.DateTimeFormat"/);
+    const again = await install(s, "moment");
+    expect(again.allow === false && again.reason).toMatch(/already decided not to add `moment`/);
+    // A note on the decline that names the package is not an approval.
+    const other = await held(s, "lodash");
+    await engine().resolveCheckpoint(other.cp.id, { action: "choose", option: DECISION_DECLINE, text: "lodash is too heavy" });
+    await other.call;
+    expect((await install(s, "lodash")).allow).toBe(false);
+    expect(pending(s)).toHaveLength(0);
+    // The developer can change their mind in their own words.
+    idle(s);
+    await service.send(s.id, "OK, add `moment` after all.");
+    expect(await install(s, "moment")).toEqual({ allow: true });
+  });
+
+  it("a free-text answer reaches the agent first; its retry runs without asking again", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { call, cp } = await held(s);
+    await engine().resolveCheckpoint(cp.id, { action: "answer", text: "fine, but pin it to 4.x" });
+    const decision = await call;
+    expect(decision.allow === false && decision.reason).toMatch(/They said: "fine, but pin it to 4.x"/);
+    expect(await install(s, "zod@4")).toEqual({ allow: true });
+    // Typing in the chat while a call is held answers it, like any checkpoint.
+    const second = await held(s, "dayjs");
+    expect((await service.send(s.id, "go ahead")).kind).toBe("checkpoint-answered");
+    expect((await second.call).allow).toBe(false);
+    expect(store.getCheckpoint(second.cp.id)!.resolution).toMatchObject({ action: "answer", text: "go ahead" });
+  });
+
+  it("You decide lets the agent go ahead", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { call, cp } = await held(s);
+    await engine().resolveCheckpoint(cp.id, { action: "delegate" });
+    expect(await call).toEqual({ allow: true });
+  });
+
+  it("Learn asks for the developer's reasoning first; the agent must respond to it", async () => {
+    const s = await newSession("learn");
+    await service.send(s.id, "speed up the search page");
+    // Learn's gate comes first: no code changes, and no decision question, before the developer engages.
+    expect((await install(s, "lodash")).allow).toBe(false);
+    expect(store.listCheckpoints(s.id)).toHaveLength(0);
+    idle(s);
+    await service.send(s.id, "I think the filter runs on every keystroke");
+
+    const { call, cp } = await held(s, "lodash");
+    expect(cp).toMatchObject({ category: "hypothesis", options: [], decision: { style: "reasoning" } });
+    expect(cp.question).toMatch(/what do you think this task needs it for/);
+    await engine().resolveCheckpoint(cp.id, { action: "answer", text: "debounce, but we could write it ourselves" });
+    const decision = await call;
+    expect(decision.allow === false && decision.reason).toMatch(/Their reasoning: "debounce, but we could write it ourselves"\. Before you continue, respond to it/);
+    expect(await install(s, "lodash")).toEqual({ allow: true });
+  });
+
+  it("Learn hints are progressive: the agent gives one, and Peer asks again on the retry", async () => {
+    const s = await newSession("learn");
+    await service.send(s.id, "task");
+    idle(s);
+    await service.send(s.id, "reply");
+    const first = await held(s, "lodash");
+    await engine().resolveCheckpoint(first.cp.id, { action: "hint" });
+    const decision = await first.call;
+    expect(decision.allow === false && decision.reason).toMatch(/asked for a hint \(hint 1\).*Peer will ask them again/);
+    const second = await held(s, "lodash");
+    expect(second.cp.id).not.toBe(first.cp.id);
+    // A hint request that names the package is not an approval either (review F1).
+    await engine().resolveCheckpoint(second.cp.id, { action: "hint", text: "What does lodash provide here?" });
+    await second.call;
+    const third = await held(s, "lodash");
+    expect(third.cp.id).not.toBe(second.cp.id);
+    await engine().resolveCheckpoint(third.cp.id, { action: "delegate" });
+    expect(await third.call).toEqual({ allow: true });
+  });
+
+  it("'Direct answer' in Learn asks with a pick-one instead of a reasoning question", async () => {
+    const s = await newSession("learn");
+    await service.send(s.id, "/answer how do I validate this");
+    const { cp } = await held(s);
+    expect(cp).toMatchObject({ category: "architecture", decision: { style: "choice" } });
+  });
+
+  it("Focus and 'Just do it' note the decision in the transcript without interrupting", async () => {
+    const focus = await newSession("focus");
+    await service.send(focus.id, "task");
+    expect(await install(focus)).toEqual({ allow: true });
+    expect(await install(focus)).toEqual({ allow: true });
+    const noted = store.listCheckpoints(focus.id);
+    expect(noted).toHaveLength(1);
+    expect(noted[0]).toMatchObject({ source: "peer", status: "auto_resolved", decision: { subjects: ["zod"] }, resolution: { action: "policy", note: "Focus mode notes this without interrupting you" } });
+
+    const collab = await newSession("collaborate");
+    await service.send(collab.id, "/go task");
+    expect(await install(collab)).toEqual({ allow: true });
+    expect(store.listCheckpoints(collab.id)[0]!.resolution!.note).toBe('"Just do it" notes this without interrupting you');
+  });
+
+  it("does not ask about a dependency the developer asked for, or accepted in an agent checkpoint", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "Add `zod` and validate the request body. Don't use `lodash`.");
+    expect(await install(s, "zod")).toEqual({ allow: true });
+    // A negation in the sentence is not an approval.
+    (await held(s, "lodash")).call.catch(() => {});
+    await engine().abort(s.id);
+
+    idle(s);
+    await service.send(s.id, "next task");
+    const { checkpoint } = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "tradeoff", question: "Which date library?", options: ["dayjs", "date-fns"], recommendation: "dayjs" });
+    await engine().resolveCheckpoint(checkpoint!.id, { action: "choose", option: "date-fns" });
+    expect(await install(s, "date-fns")).toEqual({ allow: true });
+    expect((await held(s, "dayjs")).cp.decision!.subjects).toEqual(["dayjs"]);
+  });
+
+  it("an approved confirm plan counts as approval of what it names", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { checkpoint } = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "confirm", question: "Plan for logging.\nAdd the pino library for structured logs and replace console.log. OK?", options: ["Go ahead"] });
+    await engine().resolveCheckpoint(checkpoint!.id, { action: "choose", option: "Go ahead" });
+    expect(await install(s, "pino")).toEqual({ allow: true });
+  });
+
+  it("asks only about the undecided packages of a multi-package install", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "Use `zod`.");
+    const call = engine().checkTool(s.runtimeSessionId, "bash", { command: "npm install zod lodash" });
+    await tick();
+    expect(pending(s)[0]!.decision!.subjects).toEqual(["lodash"]);
+    await engine().resolveCheckpoint(pending(s)[0]!.id, { action: "choose", option: DECISION_APPROVE });
+    expect(await call).toEqual({ allow: true });
+  });
+
+  it("does not use the agent's checkpoint budget", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { call, cp } = await held(s);
+    await engine().resolveCheckpoint(cp.id, { action: "choose", option: DECISION_APPROVE });
+    await call;
+    for (let i = 0; i < 3; i++) {
+      const { checkpoint } = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "tradeoff", question: `Q${i}` });
+      expect(checkpoint!.status).toBe("pending");
+      await engine().resolveCheckpoint(checkpoint!.id, { action: "delegate" });
+    }
+    const { checkpoint } = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "tradeoff", question: "Q4" });
+    expect(checkpoint!.status).toBe("auto_resolved");
+  });
+
+  it("Stop cancels the held call: it does not run", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { call, cp } = await held(s);
+    await engine().abort(s.id);
+    const decision = await call;
+    expect(decision.allow === false && decision.reason).toMatch(/question was cancelled \(Stopped by the developer\)/);
+    expect(store.getCheckpoint(cp.id)!.status).toBe("cancelled");
+    // The run's own abort signal cancels it too.
+    idle(s);
+    await service.send(s.id, "again");
+    const controller = new AbortController();
+    const call2 = install(s, "zod", controller.signal);
+    await tick();
+    controller.abort();
+    expect((await call2).allow).toBe(false);
+  });
+
+  it("survives a restart: answering resumes the work with the decision recorded", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { cp } = await held(s);
+
+    const runtime2 = new FakeRuntime();
+    const service2 = new PeerService(store, new RuntimeSet([runtime2]), new EventHub());
+    expect(store.getCheckpoint(cp.id)!.status).toBe("interrupted");
+    await service2.engine.resolveCheckpoint(cp.id, { action: "choose", option: DECISION_APPROVE });
+    const resumed = runtime2.lastPrompt().input.text;
+    expect(resumed).toContain("Before `npm install zod` ran, Peer paused it");
+    expect(resumed).toContain("they approved. Go ahead (run `npm install zod` again)");
+    expect(await service2.engine.checkTool(s.runtimeSessionId, "bash", { command: "npm install zod" })).toEqual({ allow: true });
+  });
+
+  it("an interrupted question is replaced when the agent retries instead of piling up", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { cp } = await held(s);
+    runtime.emit({ type: "runtime.restarted" });
+    expect(store.getCheckpoint(cp.id)!.status).toBe("interrupted");
+    await service.send(s.id, "carry on");
+    const again = await held(s);
+    expect(store.getCheckpoint(cp.id)!.status).toBe("cancelled");
+    expect(again.cp.id).not.toBe(cp.id);
+  });
+
+  it("over the bridge (OpenCode), the call long-polls for the decision", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const check = await engine().evaluateTool(s.runtimeSessionId, "bash", { command: "npm install zod" });
+    expect(check).toHaveProperty("wait");
+    const id = (check as { wait: string }).wait;
+    expect(await engine().waitForToolDecision(id, 20)).toBeNull();
+    const waiting = engine().waitForToolDecision(id, 5000);
+    await engine().resolveCheckpoint(id, { action: "choose", option: DECISION_APPROVE });
+    expect(await waiting).toEqual({ allow: true });
+  });
+
+  it("tells the agent about it in Collaborate and Learn, not in Focus", async () => {
+    for (const mode of ["collaborate", "learn", "focus"] as const) {
+      const s = await newSession(mode);
+      await service.send(s.id, "task");
+      const said = runtime.lastPrompt().input.system.includes("Peer itself pauses some actions before they run");
+      expect(said).toBe(mode !== "focus");
+    }
   });
 });

@@ -19,12 +19,32 @@ Peer is not a tutor, a quiz app, or a coding agent with a different system promp
 | Checkpoints per turn (risk exempt) | 1 | 3 | 4 |
 | Code changes at the start of a new task | allowed | allowed (agent discusses significant work first) | **locked until you engage** |
 | Hints | on request | on request | offered on every question |
+| New dependencies (Peer detects them itself) | noted, not asked | Peer pauses and asks: add it or not | Peer pauses and asks for your reasoning first |
 
 **Focus** works autonomously. It interrupts only for significant uncertainty, risky operations and architectural decisions, verifies its work, and summarizes trade-offs. If it tries to ask you about anything else, such as a stylistic trade-off, Peer declines the question and tells the agent to decide and report the decision in its summary.
 
 **Collaborate** behaves like an experienced engineer. It explores first, proposes an approach with real alternatives and trade-offs, challenges questionable assumptions, and agrees on important decisions before significant implementation. It proceeds on routine work without asking.
 
 **Learn** invites you to form a hypothesis or make the key decision before it hands over a solution. It asks one question grounded in *this* codebase, offers progressive hints, and helps you diagnose errors instead of silently fixing them. It still automates boilerplate, never forces a lesson on you, and moves on whenever you say so.
+
+## Decisions Peer detects itself
+
+Whether the agent asks you something depends on the model, and models often don't. For a few consequential decisions, Peer doesn't wait to be asked: it recognizes them in the agent's tool call **before the call runs**, pauses the agent, and brings the decision to you. Today that is **adding a new dependency**:
+
+- an install command that names packages: `npm`/`pnpm`/`yarn`/`bun` add or install, `pip install`, `uv add`, `poetry add`, `cargo add`, `go get`;
+- an edit, write or patch that adds an entry to a `package.json` dependency section or a `requirements*.txt` file.
+
+How Peer involves you depends on the mode. **Collaborate** asks "Add it / Don't add it". **Learn** asks what you think the task needs it for, and the agent responds to your reasoning before it continues. **Focus** (and **Just do it** in any mode) doesn't interrupt: the decision shows in the transcript as noted. **Direct answer** asks with add it / don't add it rather than a reasoning question.
+
+What you decide is applied:
+- **Add it**, **You decide**: the call runs.
+- **Don't add it**: the call doesn't run, and later attempts to add the same package in this session are rejected without asking you again.
+- An answer in your own words: the call doesn't run yet; the agent gets your words, and if it then retries, the retry runs without asking again. Whether the agent follows your words is up to the agent.
+- A hint (Learn): the agent gives one, then Peer asks again when it retries.
+
+Peer doesn't ask about what you already decided. An option you picked, or a plan you approved that asks for the package, counts. So does an unambiguous request in your own message or answer: an English sentence that opens with the request ("Add `zod`", "Please use the pino library", "Replace moment with `dayjs`") and names the package so it can only be a package (as code or in quotes, followed by "package"/"library", or a package-shaped name like `date-fns`). Anything else is not approval, and Peer asks once: a plain word ("add debug logging", "add zod"), a statement ("we use httpx elsewhere"), a question ("why is lodash here?", "can we add lodash?"), a pasted command or log (a message with a fenced or indented code block or quoted lines infers nothing at all), any sentence with a negation, and any message with letters outside A–Z (Peer only recognizes English negations, so it infers nothing from other languages). This is still a heuristic: it is built to miss an approval (and ask) rather than invent one, but an unusual sentence that fits the request pattern could be misread. Neither does it ask about mechanical installs: `npm install` or `npm ci` without package names, packages the manifest already declares, global installs, `npx`-style one-off runs, or edits to scripts, versions and other fields. These questions don't use up the agent's checkpoint budget.
+
+**Limits.** Detection reads the tool call's arguments and the manifest on disk. Manifests are parsed, never executed: `package.json` and requirements files fully, `pyproject.toml` and `Pipfile` as TOML, `setup.cfg` as INI, and `setup.py` only where a declaration is a literal list or dict. Anything Peer cannot read with confidence (invalid syntax, `install_requires=read_reqs()`, `file:` includes) declares nothing, so Peer asks. It does not see a manifest changed indirectly (a script, a code generator, `node -e`), packages installed by a command it doesn't recognize, or Codex commands your own Codex rules allow without asking Peer. It checks the manifest where the command runs (`cd`, `--prefix` and similar, OpenCode's working directory, Codex's); Claude Code's shell keeps its directory between commands without reporting it, so there Peer assumes the workspace root unless the command itself changes directory. A missed detection means Peer doesn't ask; it never blocks anything on a guess. Public API contracts and consequential configuration changes are not detected yet.
 
 ## Shared principles (all modes)
 
@@ -45,6 +65,7 @@ Peer is explicit about this distinction.
 - In **Learn**, code changes (edits and any non-read-only shell command) are **locked at the start of each new task** until the developer engages. Engaging means answering or choosing in a checkpoint, delegating, skipping, or simply replying. Reading and exploring the code stays allowed.
 - **Discuss first** and **Hint** lock code changes for the turn; **Skip to implementation** releases them.
 - **Which questions reach the developer** is decided by policy: per-mode categories and a per-turn budget. Declined questions are recorded and shown in the transcript.
+- **Decisions Peer detects** (new dependencies, see above) hold the tool call before it runs until you respond, on every runtime. Stop cancels the held call (it doesn't run); after a restart, answering resumes the work with your decision recorded. On Claude Code, the command may still show Claude Code's own permission prompt afterwards: Peer doesn't override your Claude Code permission rules. On Codex, which only tells the model "declined", Peer adds your response to the running turn.
 - The safety permission rules above.
 
 **Per runtime**, the same rules are wired into each agent's own control points:

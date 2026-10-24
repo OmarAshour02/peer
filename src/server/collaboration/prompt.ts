@@ -1,8 +1,12 @@
-import type { CheckpointCategory } from "../../shared/types.js";
+import type { CheckpointCategory, DecisionKind } from "../../shared/types.js";
 import { SHARED_PRINCIPLES, type EffectivePolicy } from "./policies.js";
 
 /** Default checkpoint tool name; runtimes that namespace tools (Claude Code's MCP) report their own. */
 export const CHECKPOINT_TOOL = "peer_checkpoint";
+
+const DECISION_DESCRIPTIONS: Record<DecisionKind, string> = {
+  dependency: "adding a new dependency (an install command or a manifest edit)",
+};
 
 const CATEGORY_DESCRIPTIONS: Record<CheckpointCategory, string> = {
   architecture: "structural decisions with lasting consequences (data model, new dependency, public API)",
@@ -53,6 +57,11 @@ export function composeSystemPrompt(plan: EffectivePolicy, tool: string = CHECKP
     `- At most ${plan.checkpointBudget} checkpoint(s) this turn (risk checkpoints excluded). Ask one focused question per checkpoint.`,
     "- Give 2-4 short options when there are discrete choices, and name the one you recommend. Use context to say why the decision matters.",
     "- The developer may answer, pick an option, delegate the decision back to you, skip the discussion, or ask for a hint. Follow the instructions in the tool result.",
+    ...(plan.decisions.ask.length > 0
+      ? [
+          `- Peer itself pauses some actions before they run and asks the developer: ${plan.decisions.ask.map((k) => DECISION_DESCRIPTIONS[k]).join("; ")}. It does not ask again about one the developer already approved or asked for. If Peer rejects such a call with the developer's response, follow that response.`,
+        ]
+      : []),
     "",
     "## Safety",
     "Destructive commands and access outside the workspace are governed by separate permission rules in every mode; the developer approves them explicitly. Never try to bypass a denied permission.",

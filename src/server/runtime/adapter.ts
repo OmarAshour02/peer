@@ -98,8 +98,17 @@ export interface ProviderConnections {
  * plugin reaches the same engine functions over the authenticated HTTP bridge instead.
  */
 export interface RuntimeHooks {
-  /** Decide whether a tool call may run under the session's collaboration gate. */
-  checkTool(runtimeSessionId: string, tool: string, args: unknown): Promise<{ allow: true } | { allow: false; reason: string }>;
+  /**
+   * Decide whether a tool call may run under the session's collaboration gate. May wait for the
+   * developer when Peer holds the call on a checkpoint; the signal (the run stopping) cancels that.
+   * `explain`: the reason must reach the model (send it separately if the runtime only says "declined").
+   */
+  checkTool(
+    runtimeSessionId: string,
+    tool: string,
+    args: unknown,
+    signal?: AbortSignal,
+  ): Promise<{ allow: true } | { allow: false; reason: string; explain?: boolean }>;
   /**
    * Open a checkpoint and wait for the developer's response. Resolves with the text to return to
    * the agent; rejects if the checkpoint was cancelled or the signal aborted.

@@ -31,6 +31,8 @@ import { CLAUDE_CHECKPOINT_TOOL, peerToolInput, peerToolName, toolResultDiff, to
 
 /** The SDK version Peer is built against; it tracks Claude Code CLI 2.1.x. */
 export const CLAUDE_AGENT_SDK_VERSION = "0.3.308";
+/** PreToolUse hook timeout, in seconds: long enough for the developer to answer a held call. */
+export const GATE_HOOK_TIMEOUT_S = 24 * 60 * 60;
 
 export interface ClaudeAdapterOptions {
   env: NodeJS.ProcessEnv;
@@ -347,7 +349,9 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
           mcpServers: { peer: this.checkpointServer(sessionId, run) },
           // Peer checkpoints replace Claude Code's own question tool.
           disallowedTools: ["AskUserQuestion"],
-          hooks: { PreToolUse: [{ hooks: [this.gateHook(sessionId)] }] },
+          // The gate can hold a call on a Peer checkpoint until the developer responds, so the hook
+          // gets a human-scale timeout (seconds); Stop aborts the wait through the run's signal.
+          hooks: { PreToolUse: [{ hooks: [this.gateHook(sessionId, run)], timeout: GATE_HOOK_TIMEOUT_S }] },
           canUseTool: this.permissionPrompt(sessionId, run),
           stderr: (data) => this.opts.log(`[claude] ${data.trimEnd()}`),
         },
@@ -410,14 +414,14 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   }
 
   /** Peer's collaboration gate and safety rules, consulted before every tool call. */
-  private gateHook(sessionId: string): HookCallback {
-    return async (input) => {
+  private gateHook(sessionId: string, run: Run): HookCallback {
+    return async (input, _toolUseId, { signal }) => {
       if (input.hook_event_name !== "PreToolUse") return {};
       const name = input.tool_name;
       // Peer's own checkpoint tool never needs an approval prompt.
       if (name === CLAUDE_CHECKPOINT_TOOL) return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" } };
       const args = peerToolInput(name, input.tool_input);
-      const decision = await this.opts.hooks.checkTool(sessionId, peerToolName(name), args);
+      const decision = await this.opts.hooks.checkTool(sessionId, peerToolName(name), args, AbortSignal.any([signal, run.abort.signal]));
       if (!decision.allow) {
         return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: decision.reason } };
       }
