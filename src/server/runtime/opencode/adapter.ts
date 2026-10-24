@@ -4,6 +4,7 @@ import { ProviderError, type AgentRuntimeAdapter, type PromptInput, type Provide
 import { CHECKPOINT_TOOL } from "../../collaboration/prompt.js";
 import { credentialIds, importedIds, markConnectedInPeer, markDisconnectedInPeer, runtimeAuthFile } from "./credentials.js";
 import { OpenCodeProcess, type OpenCodeProcessOptions } from "./process.js";
+import { LocalServers } from "./local.js";
 import { ProviderReload, toCatalog, type OcAuthMethods, type OcProviderList } from "./providers.js";
 import { errorMessage, mergeTurnDiffs, normalizeDiff, normalizeEvent, normalizeMessage, normalizePart, normalizePermission } from "./normalize.js";
 
@@ -28,9 +29,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   /** Directories the runtime has an instance for; checked for running sessions before a provider reload. */
   private readonly directories = new Set<string>();
   private readonly reload: ProviderReload;
+  private readonly local: LocalServers;
 
   constructor(private readonly opts: OpenCodeProcessOptions) {
     this.process = new OpenCodeProcess(opts);
+    this.local = new LocalServers(opts.rootDir);
     this.reload = new ProviderReload({
       anyBusy: () => this.anyBusy(),
       dispose: async () => {
@@ -75,6 +78,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       const health = await this.client.global.health();
       this.subscribe();
       this.setStatus({ state: "ready", version: health.data?.version });
+      void this.refreshLocal();
     } catch (err) {
       this.setStatus({ state: "error", error: err instanceof Error ? err.message : String(err) });
       throw err;
@@ -171,9 +175,22 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     return { id: res.data.id, title: res.data.title };
   }
 
+  /**
+   * Messages, without those an undo reverted: OpenCode keeps them until the next prompt (so a
+   * revert can be taken back), but to the agent and the developer they are gone.
+   */
+  private async keptMessages(directory: string, sessionId: string) {
+    const [messages, session] = await Promise.all([
+      this.sdk().session.messages({ sessionID: sessionId, directory }, { throwOnError: true }),
+      this.sdk().session.get({ sessionID: sessionId, directory }, { throwOnError: true }),
+    ]);
+    const revertedFrom = session.data.revert?.messageID;
+    const cut = revertedFrom ? messages.data.findIndex((m) => m.info.id === revertedFrom) : -1;
+    return cut === -1 ? messages.data : messages.data.slice(0, cut);
+  }
+
   async getMessages(directory: string, sessionId: string): Promise<PeerMessage[]> {
-    const res = await this.sdk().session.messages({ sessionID: sessionId, directory }, { throwOnError: true });
-    return res.data.map((m) => ({
+    return (await this.keptMessages(directory, sessionId)).map((m) => ({
       ...normalizeMessage(m.info),
       parts: m.parts.map(normalizePart).filter((p) => p !== null),
     }));
@@ -184,9 +201,17 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
    * user message carries the diff of the turn it started, so aggregate those per file.
    */
   async getDiff(directory: string, sessionId: string) {
-    const res = await this.sdk().session.messages({ sessionID: sessionId, directory }, { throwOnError: true });
-    const turns = res.data.flatMap((m) => (m.info.role === "user" && m.info.summary?.diffs ? [normalizeDiff(m.info.summary.diffs)] : []));
+    const messages = await this.keptMessages(directory, sessionId);
+    const turns = messages.flatMap((m) => (m.info.role === "user" && m.info.summary?.diffs ? [normalizeDiff(m.info.summary.diffs)] : []));
     return mergeTurnDiffs(turns);
+  }
+
+  /** OpenCode's own revert: the turns leave the conversation (and their file changes are undone again, to the same state). */
+  async forgetTurns(directory: string, sessionId: string, since: number): Promise<boolean> {
+    const first = (await this.keptMessages(directory, sessionId)).find((m) => m.info.role === "user" && m.info.time.created >= since);
+    if (!first) return true;
+    await this.sdk().session.revert({ sessionID: sessionId, directory, messageID: first.info.id }, { throwOnError: true });
+    return true;
   }
 
   async getParentSessionId(directory: string, sessionId: string): Promise<string | null> {
@@ -231,6 +256,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     return res.data.map((t) => t.id);
   }
 
+  /** Ask local servers for their current models; reload providers if an added server's list changed. */
+  private async refreshLocal() {
+    try {
+      const { servers, changed } = await this.local.refresh(this.opts.env);
+      if (changed) void this.reload.request();
+      return servers;
+    } catch (err) {
+      this.opts.log(`[peer] checking local model servers failed: ${String(err)}`);
+      return [];
+    }
+  }
+
   private async anyBusy(): Promise<boolean> {
     for (const directory of this.directories) {
       const res = await this.sdk().session.status({ directory }, { throwOnError: true });
@@ -249,9 +286,10 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   readonly providers: ProviderConnections = {
     catalog: async () => {
-      const [list, methods] = await Promise.all([
+      const [list, methods, local] = await Promise.all([
         this.sdk().provider.list({}, { throwOnError: true }),
         this.sdk().provider.auth({}, { throwOnError: true }),
+        this.refreshLocal(),
       ]);
       return toCatalog(
         list.data as OcProviderList,
@@ -259,6 +297,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         credentialIds(runtimeAuthFile(this.opts.rootDir)),
         importedIds(runtimeAuthFile(this.opts.rootDir)),
         this.reload.isPending,
+        local,
       );
     },
     setKey: async (providerId, key, inputs) => {
@@ -289,6 +328,14 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }
       await this.sdk().auth.remove({ providerID: providerId }, { throwOnError: true });
       markDisconnectedInPeer(runtimeAuthFile(this.opts.rootDir), providerId);
+      await this.reload.request();
+    },
+    addLocal: async (input) => {
+      await this.local.add(input);
+      await this.reload.request();
+    },
+    removeLocal: async (id) => {
+      this.local.remove(id);
       await this.reload.request();
     },
   };

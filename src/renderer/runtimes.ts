@@ -8,5 +8,6 @@ export const RUNTIME_UI: Record<RuntimeKind, { label: string; short: string; set
 };
 
 export function statusDot(status: RuntimeStatus): string {
-  return status.state === "ready" ? "bg-focus" : status.state === "error" || status.state === "unavailable" ? "bg-danger" : "bg-warn";
+  if (status.state === "ready") return status.warning ? "bg-warn" : "bg-focus";
+  return status.state === "error" || status.state === "unavailable" ? "bg-danger" : "bg-warn";
 }

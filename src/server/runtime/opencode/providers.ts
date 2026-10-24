@@ -1,4 +1,4 @@
-import type { ProviderAuthMethodInfo, ProviderAuthPrompt, ProviderCatalog, ProviderEntry, ProviderSource } from "../../../shared/types.js";
+import type { LocalServerInfo, ProviderAuthMethodInfo, ProviderAuthPrompt, ProviderCatalog, ProviderEntry, ProviderSource } from "../../../shared/types.js";
 
 /** The parts of OpenCode's `GET /provider` this module reads. Its entries also carry keys and options; those never leave. */
 export interface OcProviderList {
@@ -27,10 +27,19 @@ function sourceOf(provider: OcProviderList["all"][number], runtimeIds: Set<strin
   return "built-in";
 }
 
-export function toCatalog(list: OcProviderList, methods: OcAuthMethods, runtimeIds: Set<string>, userIds: Set<string>, reloadPending: boolean): ProviderCatalog {
+export function toCatalog(
+  list: OcProviderList,
+  methods: OcAuthMethods,
+  runtimeIds: Set<string>,
+  userIds: Set<string>,
+  reloadPending: boolean,
+  local: LocalServerInfo[] = [],
+): ProviderCatalog {
   const connected = new Set(list.connected);
   const rank = (id: string) => (POPULAR.includes(id) ? POPULAR.indexOf(id) : POPULAR.length);
-  const providers: ProviderEntry[] = list.all.map((p) => ({
+  // Added local servers are listed under `local`, not as providers to connect.
+  const localIds = new Set(local.flatMap((s) => (s.id ? [s.id] : [])));
+  const providers: ProviderEntry[] = list.all.filter((p) => !localIds.has(p.id)).map((p) => ({
     id: p.id,
     name: p.name,
     connected: connected.has(p.id),
@@ -40,7 +49,7 @@ export function toCatalog(list: OcProviderList, methods: OcAuthMethods, runtimeI
     env: p.env ?? [],
   }));
   providers.sort((a, b) => Number(b.connected) - Number(a.connected) || rank(a.id) - rank(b.id) || a.name.localeCompare(b.name));
-  return { providers, reloadPending };
+  return { providers, local, reloadPending };
 }
 
 /**

@@ -9,6 +9,9 @@ export class FakeRuntime implements AgentRuntimeAdapter {
   sandboxFixedPerTurn = false;
   prompts: { directory: string; sessionId: string; input: PromptInput }[] = [];
   aborted: string[] = [];
+  /** `forgetTurns` calls, and what the fake answers (true: the runtime drops the turns itself). */
+  forgotten: { sessionId: string; since: number }[] = [];
+  forgets = false;
   parents = new Map<string, string>();
   private listeners = new Set<(e: RuntimeEvent) => void>();
   private n = 0;
@@ -56,6 +59,10 @@ export class FakeRuntime implements AgentRuntimeAdapter {
   async replyPermission(_d: string, _id: string, _r: PermissionReply) {}
   async listToolIds(_d: string, _m: ModelRef) {
     return [];
+  }
+  async forgetTurns(_d: string, sessionId: string, since: number) {
+    this.forgotten.push({ sessionId, since });
+    return this.forgets;
   }
   onEvent(listener: (e: RuntimeEvent) => void) {
     this.listeners.add(listener);

@@ -10,6 +10,7 @@ import {
   TURN_INTENTS,
   type CheckpointAction,
   type CollaborationModeId,
+  type LocalServerKind,
   type RuntimeKind,
   type ModelRef,
   type PeerEvent,
@@ -181,6 +182,15 @@ export function createApp(deps: AppDeps): Hono {
       return fail(c, err);
     }
   });
+  api.patch("/workspaces/:id", async (c) => {
+    try {
+      const body = await c.req.json<{ sandboxNetwork?: unknown }>();
+      if (body.sandboxNetwork !== undefined && typeof body.sandboxNetwork !== "boolean") return c.json({ error: "sandboxNetwork must be true or false" }, 400);
+      return c.json(service.updateWorkspace(c.req.param("id"), { sandboxNetwork: body.sandboxNetwork }));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
   api.delete("/workspaces/:id", (c) => {
     service.store.removeWorkspace(c.req.param("id"));
     return c.json({ ok: true });
@@ -269,6 +279,24 @@ export function createApp(deps: AppDeps): Hono {
     }),
   );
 
+  // Local model servers (Ollama, LM Studio, any OpenAI-compatible address).
+  api.post("/runtimes/:kind/local-servers", (c) =>
+    withProviders(c, async (p) => {
+      const body = await c.req.json<{ baseUrl?: unknown; name?: unknown; kind?: unknown }>();
+      if (typeof body.baseUrl !== "string" || body.baseUrl.length > 2000) return c.json({ error: "Enter the server's address." }, 400);
+      if (body.name !== undefined && typeof body.name !== "string") return c.json({ error: "Invalid name" }, 400);
+      if (body.kind !== undefined && !["ollama", "lmstudio", "custom"].includes(body.kind as string)) return c.json({ error: "Invalid kind" }, 400);
+      await p.addLocal({ baseUrl: body.baseUrl, name: body.name as string | undefined, kind: body.kind as LocalServerKind | undefined });
+      return c.json(await p.catalog());
+    }),
+  );
+  api.delete("/runtimes/:kind/local-servers/:id", (c) =>
+    withProviders(c, async (p) => {
+      await p.removeLocal(c.req.param("id"));
+      return c.json(await p.catalog());
+    }),
+  );
+
   api.get("/sessions/:id", (c) => {
     try {
       return c.json(service.snapshot(c.req.param("id")));
@@ -320,6 +348,13 @@ export function createApp(deps: AppDeps): Hono {
       if (typeof body.text !== "string") return c.json({ error: "text is required" }, 400);
       if (body.intent !== undefined && !isIntent(body.intent)) return c.json({ error: "Unknown intent" }, 400);
       return c.json(await service.send(c.req.param("id"), body.text, body.intent as TurnIntent | undefined));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+  api.post("/sessions/:id/undo", async (c) => {
+    try {
+      return c.json(await service.undoLastTurn(c.req.param("id")));
     } catch (err) {
       return fail(c, err);
     }

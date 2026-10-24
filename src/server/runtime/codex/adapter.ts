@@ -8,35 +8,39 @@ import type { AgentRuntimeAdapter, PromptInput, RuntimeEvent, RuntimeHooks } fro
 import { findExecutable, runCli } from "../cli.js";
 import { changedFiles, diffSinceSnapshot, snapshotWorkspace } from "../git-snapshot.js";
 import { Transcript, titleFromPrompt, type RuntimeStorage } from "../transcript.js";
+import { TESTED_VERSIONS, versionWarning } from "../versions.js";
 import { isDocFile, isTestCommand, normalizeItem, TestEvidence, UNTESTED_CHANGE_WARNING, type CodexItem } from "./normalize.js";
 import { CodexRpc, type RpcNotification, type RpcRequest } from "./rpc.js";
 
-/** The Codex CLI version this integration was built and tested against. */
-export const CODEX_TESTED_VERSION = "0.163.0";
 
-// Codex's sandbox has no network, which also blocks tests that open a local port. Rerunning with
-// escalated permissions turns that into an approval request, which Peer sends to the developer.
+// Codex's sandbox has no network by default, which also blocks tests that open a local port.
+// Rerunning with escalated permissions turns that into an approval request, which Peer sends to
+// the developer. A workspace can allow network access instead (Workspace.sandboxNetwork).
 const SANDBOX_NOTE =
   "Sandbox: your commands run without network access, which also blocks opening local ports (tests that start a server fail with errors like `listen EPERM`). " +
   "When a command fails only because of the sandbox, rerun it with escalated permissions and a one-line justification; Peer asks the developer. Do not report work as tested if its tests could not run.";
+const SANDBOX_NOTE_NETWORK =
+  "Sandbox: your commands may use the network, including opening local ports. If a command still fails only because of the sandbox, rerun it with escalated permissions and a one-line justification; Peer asks the developer. Do not report work as tested if its tests could not run.";
 
 /**
  * `turn/start` parameters. Codex fixes the sandbox for the whole turn: read-only when the turn
- * starts gated, workspace-write otherwise, never with network access.
+ * starts gated, workspace-write otherwise. Network access only for writable turns in workspaces
+ * that allow it; read-only turns never get it.
  */
 export function turnStartParams(threadId: string, input: PromptInput, model: string | undefined) {
+  const writable = input.gate === "open";
+  const network = writable && input.network === true;
   return {
     threadId,
     // developerInstructions are fixed per thread, so the per-turn policy travels with the input.
     input: [
-      { type: "text", text: `<peer_collaboration_policy>\n${input.system}\n\n${SANDBOX_NOTE}\n</peer_collaboration_policy>`, text_elements: [] },
+      { type: "text", text: `<peer_collaboration_policy>\n${input.system}\n\n${network ? SANDBOX_NOTE_NETWORK : SANDBOX_NOTE}\n</peer_collaboration_policy>`, text_elements: [] },
       { type: "text", text: input.text, text_elements: [] },
     ],
     approvalPolicy: "untrusted",
-    sandboxPolicy:
-      input.gate === "open"
-        ? { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
-        : { type: "readOnly", networkAccess: false },
+    sandboxPolicy: writable
+      ? { type: "workspaceWrite", writableRoots: [], networkAccess: network, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
+      : { type: "readOnly", networkAccess: false },
     model,
   };
 }
@@ -162,6 +166,8 @@ export class CodexAdapter implements AgentRuntimeAdapter {
   private current: RuntimeStatus = { state: "stopped" };
   private version: string | undefined;
   private account: string | undefined;
+  /** The installed CLI is outside the tested version range. */
+  private warning: string | undefined;
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
   /** Threads loaded in the current app-server process. */
   private loaded = new Set<string>();
@@ -214,6 +220,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
       return;
     }
     this.version = match[1];
+    this.warning = versionWarning("Codex", this.version, TESTED_VERSIONS.codex, "`npm install -g @openai/codex` or your package manager");
     const login = await runCli(this.binary, ["login", "status"], this.opts.env);
     if (login.code !== 0) {
       this.setStatus({ state: "unavailable", error: "Codex is not logged in. Run `codex login` in a terminal, then restart this runtime." });
@@ -222,7 +229,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
     this.account = codexAccount(login.stdout + login.stderr);
     try {
       await this.spawn();
-      this.setStatus({ state: "ready", version: this.version, account: this.account });
+      this.setStatus({ state: "ready", version: this.version, account: this.account, warning: this.warning });
     } catch (err) {
       this.setStatus({ state: "error", error: `Codex app-server failed to start: ${err instanceof Error ? err.message : String(err)}` });
       throw err;
@@ -279,7 +286,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
     if (this.stopped || this.rpc) return;
     try {
       await this.spawn();
-      this.setStatus({ state: "ready", version: this.version, account: this.account });
+      this.setStatus({ state: "ready", version: this.version, account: this.account, warning: this.warning });
       this.emit({ type: "runtime.restarted" });
     } catch (err) {
       this.setStatus({ state: "error", error: `Codex app-server failed to restart: ${err instanceof Error ? err.message : String(err)}` });
@@ -339,6 +346,16 @@ export class CodexAdapter implements AgentRuntimeAdapter {
   async getDiff(directory: string, sessionId: string) {
     const base = this.state(sessionId).baseline;
     return base ? diffSinceSnapshot(directory, base, this.indexFile(sessionId)) : [];
+  }
+
+  /**
+   * Undo drops the turns from Peer's transcript. The CLI's own session keeps them, so the agent
+   * still remembers that work and is told on its next turn that it was undone.
+   */
+  async forgetTurns(_directory: string, sessionId: string, since: number): Promise<boolean> {
+    if (this.runs.has(sessionId)) throw new Error("The agent is still working on this session.");
+    this.transcript(sessionId).dropSince(since);
+    return false;
   }
 
   async getParentSessionId(): Promise<string | null> {

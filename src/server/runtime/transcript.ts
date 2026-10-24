@@ -7,6 +7,7 @@ export interface RuntimeStorage {
   setRuntimeState(runtime: RuntimeKind, sessionId: string, state: unknown): void;
   listTranscript(runtime: RuntimeKind, sessionId: string): PeerMessage[];
   saveTranscriptMessage(runtime: RuntimeKind, sessionId: string, message: PeerMessage): void;
+  deleteTranscriptMessages(runtime: RuntimeKind, sessionId: string, messageIds: string[]): void;
 }
 
 /**
@@ -37,6 +38,14 @@ export class Transcript {
 
   has(messageId: string): boolean {
     return this.messages.has(messageId);
+  }
+
+  /** Forget every message created at or after `since` (an undone turn and anything after it). */
+  dropSince(since: number): number {
+    const dropped = [...this.messages.values()].filter((m) => m.createdAt >= since).map((m) => m.id);
+    for (const id of dropped) this.messages.delete(id);
+    this.storage.deleteTranscriptMessages(this.kind, this.sessionId, dropped);
+    return dropped.length;
   }
 
   /** Strictly increasing timestamps keep the UI's createdAt ordering stable. */

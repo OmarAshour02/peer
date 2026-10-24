@@ -1,6 +1,7 @@
 import type {
   FileDiff,
   GateKind,
+  LocalServerKind,
   ModelRef,
   ModelsResponse,
   OAuthStart,
@@ -59,6 +60,13 @@ export interface AgentRuntimeAdapter {
 
   onEvent(listener: (event: RuntimeEvent) => void): () => void;
 
+  /**
+   * Undo: drop everything from the first user message created at or after `since` from the
+   * conversation. Peer has already put the files back. Resolves true if the agent no longer sees
+   * those turns, false if they stay in its context (Peer then tells it they were undone).
+   */
+  forgetTurns(directory: string, sessionId: string, since: number): Promise<boolean>;
+
   /** Present when Peer can connect this runtime's model providers itself (OpenCode). */
   readonly providers?: ProviderConnections;
 }
@@ -80,6 +88,9 @@ export interface ProviderConnections {
   finishOAuth(providerId: string, method: number, code?: string): Promise<void>;
   /** Only providers connected in Peer ("peer" source) can be disconnected here. */
   disconnect(providerId: string): Promise<void>;
+  /** Add an OpenAI-compatible local server (Ollama, LM Studio, ...); its models become a provider. */
+  addLocal(input: { baseUrl: string; name?: string; kind?: LocalServerKind }): Promise<void>;
+  removeLocal(id: string): Promise<void>;
 }
 
 /**
@@ -103,6 +114,8 @@ export interface PromptInput {
   /** How code changes are gated at the start of this turn (runtimes may enforce it natively too). */
   gate: GateKind;
   model?: ModelRef | null;
+  /** Commands may use the network inside the runtime's OS sandbox (Codex; others have no sandbox). */
+  network?: boolean;
   /** Tools to enable/disable for this turn. */
   tools?: Record<string, boolean>;
 }

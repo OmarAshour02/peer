@@ -7,9 +7,11 @@ import type {
   RuntimeKind,
   Preferences,
   SessionSnapshot,
+  UndoResult,
+  Workspace,
 } from "../shared/types.js";
 import { pickDefaultRuntime } from "../shared/types.js";
-import { CollaborationEngine, EngineError } from "./collaboration/engine.js";
+import { CollaborationEngine, EngineError, type EngineOptions } from "./collaboration/engine.js";
 import type { EventHub } from "./hub.js";
 import type { AgentRuntimeAdapter, RuntimeEvent } from "./runtime/adapter.js";
 import type { RuntimeSet } from "./runtime/set.js";
@@ -32,8 +34,9 @@ export class PeerService {
     readonly store: Store,
     readonly runtimes: RuntimeSet,
     private readonly hub: EventHub,
+    opts: EngineOptions = {},
   ) {
-    this.engine = new CollaborationEngine(store, runtimes, (e) => hub.emit(e));
+    this.engine = new CollaborationEngine(store, runtimes, (e) => hub.emit(e), opts);
     this.engine.recover();
     runtimes.onEvent((e, kind) => void this.onRuntimeEvent(e, kind));
   }
@@ -65,6 +68,12 @@ export class PeerService {
     return this.store.upsertWorkspace(valid.path, valid.name);
   }
 
+  updateWorkspace(id: string, patch: { sandboxNetwork?: boolean }): Workspace {
+    const ws = this.store.updateWorkspace(id, patch);
+    if (!ws) throw new EngineError("Unknown workspace", 404);
+    return ws;
+  }
+
   async createSession(
     workspaceId: string,
     input: { mode?: CollaborationModeId; model?: ModelRef | null; runtime?: RuntimeKind },
@@ -94,10 +103,13 @@ export class PeerService {
   updateSession(sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string }): PeerSession {
     let session = this.requireSession(sessionId);
     if (patch.mode) session = this.engine.setMode(sessionId, patch.mode);
-    if (patch.model !== undefined || patch.title !== undefined) {
-      session = this.store.updateSession(sessionId, { model: patch.model, title: patch.title });
-      this.hub.emit({ type: "session.updated", session });
+    if (patch.title !== undefined) {
+      const title = patch.title.replace(/\s+/g, " ").trim();
+      if (!title) throw new EngineError("A session name cannot be empty.");
+      session = this.store.renameSession(sessionId, title.slice(0, 200));
     }
+    if (patch.model !== undefined) session = this.store.updateSession(sessionId, { model: patch.model });
+    if (patch.model !== undefined || patch.title !== undefined) this.hub.emit({ type: "session.updated", session });
     return session;
   }
 
@@ -118,7 +130,14 @@ export class PeerService {
       checkpoints: this.store.listCheckpoints(sessionId),
       permissions: [...this.permissions.values()].filter((p) => p.sessionId === sessionId),
       lastError: this.lastErrors.get(sessionId) ?? null,
+      undo: this.engine.undoAvailability(sessionId),
     };
+  }
+
+  async undoLastTurn(sessionId: string): Promise<UndoResult> {
+    const result = await this.engine.undoLastTurn(sessionId);
+    this.hub.emit({ type: "session.undone", sessionId, result });
+    return result;
   }
 
   async messages(sessionId: string) {
@@ -209,15 +228,18 @@ export class PeerService {
     switch (event.type) {
       case "session.updated":
         // OpenCode titles new sessions "New session - <date>" until it generates a real title.
-        if (event.title && event.title !== session.title && !event.title.startsWith(DEFAULT_TITLE)) {
+        if (event.title && event.title !== session.title && !event.title.startsWith(DEFAULT_TITLE) && !this.store.titledByDeveloper(session.id)) {
           this.hub.emit({ type: "session.updated", session: this.store.updateSession(session.id, { title: event.title }) });
         }
         return;
       case "session.status":
+        // A turn ends with session.idle; until then (and until its end is recorded) it is not idle.
+        if (event.status === "idle" && (this.engine.hasActiveTurn(session.id) || this.engine.statusOf(session.id) !== "idle")) return;
         this.hub.emit({ type: "session.status", sessionId: session.id, status: event.status, message: event.message });
         return;
       case "session.idle":
         this.dropPermissions(session.id);
+        await this.engine.settled(session.id);
         this.hub.emit({ type: "session.status", sessionId: session.id, status: "idle" });
         return;
       case "session.error":

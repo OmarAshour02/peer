@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { NOTHING_TO_UNDO } from "../shared/types";
 import { PeerApi, resolveConfig } from "./api";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { Composer } from "./components/Composer";
@@ -10,7 +11,7 @@ import { RUNTIME_UI } from "./runtimes";
 import { activeRuntime, runtimeInfo, usePeer } from "./store";
 
 export function App() {
-  const { ready, error, activeWorkspaceId, activeSessionId, snapshot, modelsError, workspaces, api } = usePeer();
+  const { ready, error, notice, activeWorkspaceId, activeSessionId, snapshot, modelsError, workspaces, api } = usePeer();
   const kind = usePeer(activeRuntime);
   const runtimes = usePeer((s) => s.runtimes);
   const providersOpen = usePeer((s) => s.providersOpen);
@@ -98,6 +99,15 @@ export function App() {
           </div>
         )}
 
+        {notice && (
+          <div className="flex items-center gap-3 border-b border-line bg-raised px-4 py-2 text-[12px] text-muted">
+            <span className="min-w-0 flex-1">{notice}</span>
+            <button onClick={() => usePeer.getState().setNotice(null)} className="text-faint hover:text-fg">
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {snapshot ? (
           <>
             <header className="flex items-center gap-3 border-b border-line px-6 py-2.5">
@@ -107,6 +117,8 @@ export function App() {
               </div>
               <span className="text-[12px] text-faint">{RUNTIME_UI[snapshot.session.runtime].label}</span>
               <span className={`text-[12px] ${MODE_UI[snapshot.session.mode].color}`}>{MODE_UI[snapshot.session.mode].label}</span>
+              {snapshot.session.runtime === "codex" && workspace && <SandboxNetworkToggle workspaceId={workspace.id} on={workspace.sandboxNetwork} />}
+              <UndoButton />
               <button onClick={() => setShowChanges(!showChanges)} className="text-[12px] text-faint hover:text-fg">
                 {showChanges ? "Hide changes" : "Show changes"}
               </button>
@@ -124,6 +136,66 @@ export function App() {
         )}
       </main>
     </div>
+  );
+}
+
+/** Codex runs commands in an OS sandbox without network unless the workspace allows it. */
+function SandboxNetworkToggle({ workspaceId, on }: { workspaceId: string; on: boolean }) {
+  const api = usePeer((s) => s.api);
+  async function toggle() {
+    if (!api) return;
+    try {
+      const ws = await api.updateWorkspace(workspaceId, { sandboxNetwork: !on });
+      usePeer.setState((s) => ({ workspaces: s.workspaces.map((w) => (w.id === ws.id ? ws : w)) }));
+    } catch (err) {
+      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return (
+    <button
+      onClick={() => void toggle()}
+      role="switch"
+      aria-checked={on}
+      title={
+        on
+          ? "Codex commands in this project may use the network (including local ports). Applies from the next turn."
+          : "Codex runs commands without network, so tests that start a server fail. Turn on to allow network in this project, from the next turn."
+      }
+      className={`text-[12px] ${on ? "text-warn" : "text-faint hover:text-fg"}`}
+    >
+      Network: {on ? "on" : "off"}
+    </button>
+  );
+}
+
+/** Undo the last turn: its file changes are reverted and it leaves the conversation. */
+function UndoButton() {
+  const api = usePeer((s) => s.api);
+  const snapshot = usePeer((s) => s.snapshot);
+  const [busy, setBusy] = useState(false);
+  if (!snapshot || (!snapshot.undo.available && snapshot.undo.reason === NOTHING_TO_UNDO)) return null;
+  const { session, undo } = snapshot;
+
+  async function run() {
+    if (!api || !window.confirm("Undo the last turn? Every file it changed goes back to how it was before the turn, and the turn leaves the conversation.")) return;
+    setBusy(true);
+    try {
+      await api.undoTurn(session.id);
+    } catch (err) {
+      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <button
+      onClick={() => void run()}
+      disabled={!undo.available || busy}
+      title={undo.available ? "Revert the files the last turn changed and remove it from the conversation" : (undo.reason ?? undefined)}
+      className="text-[12px] text-faint hover:text-fg disabled:opacity-40 disabled:hover:text-faint"
+    >
+      {busy ? "Undoing…" : "Undo last turn"}
+    </button>
   );
 }
 

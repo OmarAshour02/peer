@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, readdirSync, rmdirSync, rmSync } from "node:fs";
+import { dirname, resolve, sep } from "node:path";
 import type { FileDiff } from "../../shared/types.js";
 
 // Session diffs for runtimes that don't track file changes per session themselves (Claude Code,
@@ -70,10 +70,78 @@ export async function diffSinceSnapshot(dir: string, base: string, indexFile: st
   return diffs;
 }
 
-/** Paths (relative to the repository root) that differ between two snapshots. */
-export async function changedFiles(dir: string, base: string, current: string): Promise<string[]> {
+/** `dir` relative to its repository root, with a trailing slash ("" at the root). */
+async function prefixOf(dir: string): Promise<string> {
+  return (await git(dir, ["rev-parse", "--show-prefix"])).trim();
+}
+
+/**
+ * Paths (relative to the repository root) that differ between two snapshots; with
+ * `insideDirectory`, only those inside `dir` (which may be a folder within the repository).
+ */
+export async function changedFiles(dir: string, base: string, current: string, opts: { insideDirectory?: boolean } = {}): Promise<string[]> {
   if (base === current) return [];
   const top = (await git(dir, ["rev-parse", "--show-toplevel"])).trim();
   // -z: unquoted names (git quotes non-ASCII paths otherwise), separated by NUL.
-  return (await git(top, ["diff-tree", "-r", "-z", "--no-renames", "--name-only", base, current])).split("\0").filter(Boolean);
+  const files = (await git(top, ["diff-tree", "-r", "-z", "--no-renames", "--name-only", base, current])).split("\0").filter(Boolean);
+  if (!opts.insideDirectory) return files;
+  const prefix = await prefixOf(dir);
+  return files.filter((f) => f.startsWith(prefix));
+}
+
+/**
+ * Put `paths` (repository-relative, inside `dir`) back to how they are in `tree`: files the tree
+ * lacks are deleted first (and directories left empty by that, up to `dir`), then the files it
+ * has are written with their content and mode. Deleting first lets a file replace a directory and
+ * the other way round. Uses its own temporary index, so the developer's index and staging area
+ * are untouched. Paths outside `dir` are refused.
+ */
+export async function restoreFiles(dir: string, tree: string, paths: string[], indexFile: string): Promise<void> {
+  if (paths.length === 0) return;
+  const top = (await git(dir, ["rev-parse", "--show-toplevel"])).trim();
+  const prefix = await prefixOf(dir);
+  const outside = paths.find((p) => !p.startsWith(prefix));
+  if (outside) throw new Error(`${outside} is outside the workspace`);
+  const root = prefix ? resolve(top, prefix) : top;
+  const present = new Set<string>();
+  for (let i = 0; i < paths.length; i += 200) {
+    const out = await git(top, ["ls-tree", "-r", "-z", "--name-only", tree, "--", ...paths.slice(i, i + 200).map(literal)]);
+    for (const p of out.split("\0")) if (p) present.add(p);
+  }
+  // Deepest first, so a directory's files go before the directory itself.
+  for (const p of paths.filter((x) => !present.has(x)).sort((a, b) => b.length - a.length)) {
+    const file = resolve(top, p);
+    if (!file.startsWith(root + sep)) continue;
+    try {
+      rmSync(file, { force: true });
+    } catch (err) {
+      // Already gone along with a parent that is now a file.
+      if ((err as NodeJS.ErrnoException).code !== "ENOTDIR") throw err;
+    }
+    // Remove directories the deleted file leaves empty, never the workspace folder itself.
+    for (let d = dirname(file); d.startsWith(root + sep); d = dirname(d)) {
+      try {
+        if (readdirSync(d).length > 0) break;
+        rmdirSync(d);
+      } catch {
+        break;
+      }
+    }
+  }
+  const restoreIndex = `${indexFile}.restore`;
+  mkdirSync(dirname(restoreIndex), { recursive: true });
+  try {
+    await git(top, ["read-tree", tree], restoreIndex);
+    const write = paths.filter((p) => present.has(p));
+    for (let i = 0; i < write.length; i += 200) {
+      await git(top, ["checkout-index", "-f", "--", ...write.slice(i, i + 200)], restoreIndex);
+    }
+  } finally {
+    rmSync(restoreIndex, { force: true });
+  }
+}
+
+/** A pathspec that matches exactly this path (no glob characters, no magic). */
+function literal(path: string): string {
+  return `:(literal)${path}`;
 }
