@@ -3,6 +3,7 @@ import type {
   CheckpointAction,
   CollaborationModeId,
   FileDiff,
+  LocalServerKind,
   ModelRef,
   ModelsResponse,
   OAuthStart,
@@ -17,6 +18,7 @@ import type {
   RuntimeStatus,
   SessionSnapshot,
   TurnIntent,
+  UndoResult,
   Workspace,
 } from "../shared/types";
 
@@ -96,11 +98,15 @@ export class PeerApi {
     this.request<ProviderCatalog>("POST", `/runtimes/${kind}/providers/${encodeURIComponent(providerId)}/oauth/callback`, { method, code });
   disconnectProvider = (kind: RuntimeKind, providerId: string) =>
     this.request<ProviderCatalog>("DELETE", `/runtimes/${kind}/providers/${encodeURIComponent(providerId)}`);
+  addLocalServer = (kind: RuntimeKind, input: { baseUrl: string; name?: string; kind?: LocalServerKind }) =>
+    this.request<ProviderCatalog>("POST", `/runtimes/${kind}/local-servers`, input);
+  removeLocalServer = (kind: RuntimeKind, id: string) => this.request<ProviderCatalog>("DELETE", `/runtimes/${kind}/local-servers/${encodeURIComponent(id)}`);
   preferences = () => this.request<Preferences>("GET", "/preferences");
   setPreferences = (prefs: Partial<Preferences>) => this.request<Preferences>("PATCH", "/preferences", prefs);
   workspaces = () => this.request<Workspace[]>("GET", "/workspaces");
   addWorkspace = (path: string) => this.request<Workspace>("POST", "/workspaces", { path });
   removeWorkspace = (id: string) => this.request("DELETE", `/workspaces/${id}`);
+  updateWorkspace = (id: string, patch: { sandboxNetwork?: boolean }) => this.request<Workspace>("PATCH", `/workspaces/${id}`, patch);
   sessions = (workspaceId: string) => this.request<PeerSession[]>("GET", `/workspaces/${workspaceId}/sessions`);
   createSession = (workspaceId: string, input: { mode?: CollaborationModeId; runtime?: RuntimeKind } = {}) =>
     this.request<PeerSession>("POST", `/workspaces/${workspaceId}/sessions`, input);
@@ -109,8 +115,9 @@ export class PeerApi {
   snapshot = (sessionId: string) => this.request<SessionSnapshot>("GET", `/sessions/${sessionId}`);
   messages = (sessionId: string) => this.request<PeerMessage[]>("GET", `/sessions/${sessionId}/messages`);
   diff = (sessionId: string) => this.request<FileDiff[]>("GET", `/sessions/${sessionId}/diff`);
-  updateSession = (sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null }) =>
+  updateSession = (sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string }) =>
     this.request<PeerSession>("PATCH", `/sessions/${sessionId}`, patch);
+  undoTurn = (sessionId: string) => this.request<UndoResult>("POST", `/sessions/${sessionId}/undo`);
   deleteSession = (sessionId: string) => this.request("DELETE", `/sessions/${sessionId}`);
   send = (sessionId: string, text: string, intent: TurnIntent) => this.request("POST", `/sessions/${sessionId}/messages`, { text, intent });
   abort = (sessionId: string) => this.request("POST", `/sessions/${sessionId}/abort`);

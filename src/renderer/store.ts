@@ -36,6 +36,8 @@ interface PeerState {
   modelsFor: RuntimeKind | null;
   modelsError: string | null;
   error: string | null;
+  /** Something to tell the developer that is not an error (e.g. what an undo did). */
+  notice: string | null;
   /** The "Models & providers" dialog. */
   providersOpen: boolean;
   /** Bumped when a runtime's providers change, so an open dialog reloads them. */
@@ -51,6 +53,7 @@ interface PeerState {
   reconnected(): Promise<void>;
   handleEvent(event: PeerEvent): void;
   setError(error: string | null): void;
+  setNotice(notice: string | null): void;
   setProvidersOpen(open: boolean): void;
 }
 
@@ -100,6 +103,7 @@ export const usePeer = create<PeerState>((set, get) => ({
   modelsFor: null,
   modelsError: null,
   error: null,
+  notice: null,
   providersOpen: false,
   providersVersion: 0,
 
@@ -147,7 +151,7 @@ export const usePeer = create<PeerState>((set, get) => ({
 
   async selectSession(id) {
     if (id) get().api?.setPreferences({ lastSessionId: id }).catch(() => {});
-    set({ activeSessionId: id, snapshot: null, messages: [], diff: [] });
+    set({ activeSessionId: id, snapshot: null, messages: [], diff: [], notice: null });
     if (id) await get().resync();
   },
 
@@ -181,6 +185,10 @@ export const usePeer = create<PeerState>((set, get) => ({
 
   setError(error) {
     set({ error });
+  },
+
+  setNotice(notice) {
+    set({ notice });
   },
 
   setProvidersOpen(open) {
@@ -231,12 +239,36 @@ export const usePeer = create<PeerState>((set, get) => ({
     const snap = s.snapshot;
 
     switch (event.type) {
-      case "session.status":
-        set({ snapshot: { ...snap, status: event.status, lastError: event.status === "busy" ? null : snap.lastError } });
-        if (event.status === "idle" && s.api) {
+      case "session.status": {
+        const busy = event.status !== "idle";
+        set({
+          snapshot: {
+            ...snap,
+            status: event.status,
+            lastError: event.status === "busy" ? null : snap.lastError,
+            undo: busy ? { available: false, reason: "Wait for the agent to finish this turn." } : snap.undo,
+          },
+        });
+        if (!busy && s.api) {
           s.api.diff(sessionId).then((diff) => get().activeSessionId === sessionId && set({ diff })).catch(() => {});
+          // Whether the turn that just ended can be undone.
+          s.api
+            .snapshot(sessionId)
+            .then((fresh) => {
+              const current = get().snapshot;
+              if (current?.session.id === sessionId) set({ snapshot: { ...current, undo: fresh.undo } });
+            })
+            .catch(() => {});
         }
         return;
+      }
+      case "session.undone": {
+        const { files, forgotten } = event.result;
+        const what = files.length === 0 ? "No files had changed." : `Restored ${files.length} file${files.length === 1 ? "" : "s"}: ${files.slice(0, 3).join(", ")}${files.length > 3 ? ", …" : ""}.`;
+        set({ notice: `Undid the last turn. ${what}${forgotten ? "" : " The agent will be told on its next turn."}`, diff: [] });
+        void get().resync();
+        return;
+      }
       case "session.error":
         set({ snapshot: { ...snap, lastError: event.error } });
         return;

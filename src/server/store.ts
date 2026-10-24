@@ -110,6 +110,18 @@ const MIGRATIONS: string[] = [
   -- The turn a continuation carries on (runtimes whose sandbox is fixed per turn).
   ALTER TABLE turns ADD COLUMN continued_from TEXT;
   `,
+  `
+  -- Commands in Codex's sandbox may use the network in this workspace.
+  ALTER TABLE workspaces ADD COLUMN sandbox_network INTEGER NOT NULL DEFAULT 0;
+  -- The workspace (a git tree) when the turn started and ended, and when the developer undid it.
+  ALTER TABLE turns ADD COLUMN start_tree TEXT;
+  ALTER TABLE turns ADD COLUMN end_tree TEXT;
+  ALTER TABLE turns ADD COLUMN undone_at INTEGER;
+  -- Turns undone that the agent still has in its context and has not been told about.
+  ALTER TABLE sessions ADD COLUMN undone_untold INTEGER NOT NULL DEFAULT 0;
+  -- The developer named the session; runtime-generated titles no longer replace it.
+  ALTER TABLE sessions ADD COLUMN titled_by_developer INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 type Row = Record<string, unknown>;
@@ -165,11 +177,16 @@ export class Store {
       this.db.prepare("UPDATE workspaces SET last_opened_at = ? WHERE path = ?").run(now, path);
       return { ...toWorkspace(existing), lastOpenedAt: now };
     }
-    const ws: Workspace = { id: newId("ws"), path, name, createdAt: now, lastOpenedAt: now };
+    const ws: Workspace = { id: newId("ws"), path, name, sandboxNetwork: false, createdAt: now, lastOpenedAt: now };
     this.db
       .prepare("INSERT INTO workspaces (id, path, name, created_at, last_opened_at) VALUES (?, ?, ?, ?, ?)")
       .run(ws.id, ws.path, ws.name, ws.createdAt, ws.lastOpenedAt);
     return ws;
+  }
+
+  updateWorkspace(id: string, patch: { sandboxNetwork?: boolean }): Workspace | null {
+    if (patch.sandboxNetwork !== undefined) this.db.prepare("UPDATE workspaces SET sandbox_network = ? WHERE id = ?").run(patch.sandboxNetwork ? 1 : 0, id);
+    return this.getWorkspace(id);
   }
 
   touchWorkspace(id: string) {
@@ -245,6 +262,17 @@ export class Store {
     return next;
   }
 
+  /** A name the developer gave the session; it stays even when the runtime generates a title later. */
+  renameSession(id: string, title: string): PeerSession {
+    this.db.prepare("UPDATE sessions SET titled_by_developer = 1 WHERE id = ?").run(id);
+    return this.updateSession(id, { title });
+  }
+
+  titledByDeveloper(id: string): boolean {
+    const row = this.db.prepare("SELECT titled_by_developer FROM sessions WHERE id = ?").get(id);
+    return Number(row?.titled_by_developer ?? 0) === 1;
+  }
+
   deleteSession(id: string) {
     const session = this.getSession(id);
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
@@ -285,10 +313,24 @@ export class Store {
       .run(runtime, sessionId, message.id, runtime, sessionId, JSON.stringify(message));
   }
 
+  /** Forget messages of an undone turn. */
+  deleteTranscriptMessages(runtime: RuntimeKind, sessionId: string, messageIds: string[]) {
+    const del = this.db.prepare("DELETE FROM transcript_messages WHERE runtime = ? AND session_id = ? AND message_id = ?");
+    for (const id of messageIds) del.run(runtime, sessionId, id);
+  }
+
   // -- turns -----------------------------------------------------------------
 
   createTurn(input: { sessionId: string; mode: CollaborationModeId; intent: TurnIntent; gate: GateKind; continuedFrom?: string | null }): Turn {
-    const turn: Turn = { id: newId("turn"), ...input, continuedFrom: input.continuedFrom ?? null, engagedAt: null, startedAt: Date.now(), endedAt: null };
+    const turn: Turn = {
+      id: newId("turn"),
+      ...input,
+      continuedFrom: input.continuedFrom ?? null,
+      engagedAt: null,
+      startedAt: Date.now(),
+      endedAt: null,
+      undoneAt: null,
+    };
     this.db
       .prepare("INSERT INTO turns (id, session_id, mode, intent, gate, continued_from, engaged_at, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL)")
       .run(turn.id, turn.sessionId, turn.mode, turn.intent, turn.gate, turn.continuedFrom, turn.startedAt);
@@ -309,6 +351,41 @@ export class Store {
 
   markTurnEngaged(id: string) {
     this.db.prepare("UPDATE turns SET engaged_at = COALESCE(engaged_at, ?) WHERE id = ?").run(Date.now(), id);
+  }
+
+  setTurnTree(id: string, which: "start" | "end", tree: string | null) {
+    this.db.prepare(`UPDATE turns SET ${which === "start" ? "start_tree" : "end_tree"} = ? WHERE id = ?`).run(tree, id);
+  }
+
+  /** The workspace trees recorded for a turn (null: not recorded, or not a git workspace). */
+  turnTrees(id: string): { start: string | null; end: string | null } {
+    const row = this.db.prepare("SELECT start_tree, end_tree FROM turns WHERE id = ?").get(id);
+    return { start: row?.start_tree == null ? null : String(row.start_tree), end: row?.end_tree == null ? null : String(row.end_tree) };
+  }
+
+  /** The most recent turn that has not been undone. */
+  latestKeptTurn(sessionId: string): Turn | null {
+    const row = this.db
+      .prepare("SELECT * FROM turns WHERE session_id = ? AND undone_at IS NULL ORDER BY started_at DESC, rowid DESC LIMIT 1")
+      .get(sessionId);
+    return row ? toTurn(row) : null;
+  }
+
+  markTurnsUndone(ids: string[]) {
+    const now = Date.now();
+    const mark = this.db.prepare("UPDATE turns SET undone_at = COALESCE(undone_at, ?) WHERE id = ?");
+    for (const id of ids) mark.run(now, id);
+  }
+
+  addUndoneUntold(sessionId: string, turns: number) {
+    this.db.prepare("UPDATE sessions SET undone_untold = undone_untold + ? WHERE id = ?").run(turns, sessionId);
+  }
+
+  /** How many undone turns the agent has not been told about; resets the count. */
+  takeUndoneUntold(sessionId: string): number {
+    const row = this.db.prepare("SELECT undone_untold FROM sessions WHERE id = ?").get(sessionId);
+    this.db.prepare("UPDATE sessions SET undone_untold = 0 WHERE id = ?").run(sessionId);
+    return Number(row?.undone_untold ?? 0);
   }
 
   endTurn(id: string) {
@@ -432,6 +509,7 @@ function toWorkspace(r: Row): Workspace {
     id: String(r.id),
     path: String(r.path),
     name: String(r.name),
+    sandboxNetwork: Number(r.sandbox_network ?? 0) === 1,
     createdAt: Number(r.created_at),
     lastOpenedAt: Number(r.last_opened_at),
   };
@@ -462,6 +540,7 @@ function toTurn(r: Row): Turn {
     engagedAt: r.engaged_at == null ? null : Number(r.engaged_at),
     startedAt: Number(r.started_at),
     endedAt: r.ended_at == null ? null : Number(r.ended_at),
+    undoneAt: r.undone_at == null ? null : Number(r.undone_at),
   };
 }
 

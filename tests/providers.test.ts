@@ -278,7 +278,7 @@ describe("agent CLI logins", () => {
 });
 
 describe("provider API", () => {
-  const catalog: ProviderCatalog = { providers: [], reloadPending: false };
+  const catalog: ProviderCatalog = { providers: [], local: [], reloadPending: false };
   let store: Store;
   let calls: unknown[][];
   let events: PeerEvent[];
@@ -298,6 +298,8 @@ describe("provider API", () => {
         return { url: "https://login.example", mode: "code", instructions: "Paste the code" };
       },
       finishOAuth: async (...args) => void calls.push(["finishOAuth", ...args]),
+      addLocal: async (...args) => void calls.push(["addLocal", ...args]),
+      removeLocal: async (...args) => void calls.push(["removeLocal", ...args]),
       disconnect: async (id) => {
         throw new ProviderError(`Only providers connected in Peer can be disconnected here (${id}).`);
       },

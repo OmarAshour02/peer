@@ -4,6 +4,7 @@ import { copyFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DESTRUCTIVE_COMMAND_PATTERNS } from "../../collaboration/safety.js";
 import { importUserCredentials, runtimeAuthFile, userAuthFile } from "./credentials.js";
+import { LocalServers } from "./local.js";
 
 export interface OpenCodeProcessOptions {
   binary: string;
@@ -75,6 +76,8 @@ export class OpenCodeProcess {
     // Not OPENCODE_AUTH_CONTENT: with it set, the runtime ignores credentials saved through its API.
     delete env.OPENCODE_AUTH_CONTENT;
     importUserCredentials(userAuthFile(opts.env), runtimeAuthFile(opts.rootDir));
+    // Local model servers, as custom providers in the config file OpenCode reads from its config dir.
+    new LocalServers(opts.rootDir).writeConfig();
 
     this.stopping = false;
     const child = spawn(opts.binary, ["serve", "--hostname", "127.0.0.1", "--port", "0"], {

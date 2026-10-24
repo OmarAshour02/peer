@@ -26,6 +26,7 @@ import type { AgentRuntimeAdapter, PromptInput, RuntimeEvent, RuntimeHooks } fro
 import { findExecutable, runCli } from "../cli.js";
 import { diffSinceSnapshot, snapshotWorkspace } from "../git-snapshot.js";
 import { Transcript, titleFromPrompt, type RuntimeStorage } from "../transcript.js";
+import { TESTED_VERSIONS, versionWarning } from "../versions.js";
 import { CLAUDE_CHECKPOINT_TOOL, peerToolInput, peerToolName, toolResultDiff, toolResultText } from "./normalize.js";
 
 /** The SDK version Peer is built against; it tracks Claude Code CLI 2.1.x. */
@@ -168,7 +169,13 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       this.setStatus({ state: "unavailable", error: "Claude Code is not logged in. Run `claude auth login` in a terminal, then restart this runtime." });
       return;
     }
-    this.setStatus({ state: "ready", version: version.stdout.trim().split(/\s/)[0], account: claudeAccount(info, loggedIn) });
+    const installed = version.stdout.trim().split(/\s/)[0];
+    this.setStatus({
+      state: "ready",
+      version: installed,
+      account: claudeAccount(info, loggedIn),
+      warning: versionWarning("Claude Code", installed, TESTED_VERSIONS.claude, "`claude update`"),
+    });
   }
 
   async stop(): Promise<void> {
@@ -258,6 +265,16 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   async getDiff(directory: string, sessionId: string) {
     const base = this.state(sessionId).baseline;
     return base ? diffSinceSnapshot(directory, base, this.indexFile(sessionId)) : [];
+  }
+
+  /**
+   * Undo drops the turns from Peer's transcript. The CLI's own session keeps them, so the agent
+   * still remembers that work and is told on its next turn that it was undone.
+   */
+  async forgetTurns(_directory: string, sessionId: string, since: number): Promise<boolean> {
+    if (this.runs.has(sessionId)) throw new Error("The agent is still working on this session.");
+    this.transcript(sessionId).dropSince(since);
+    return false;
   }
 
   async getParentSessionId(): Promise<string | null> {

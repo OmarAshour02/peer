@@ -1,6 +1,7 @@
 import {
   CHECKPOINT_ACTIONS,
   CHECKPOINT_CATEGORIES,
+  NOTHING_TO_UNDO,
   type Checkpoint,
   type CheckpointAction,
   type CheckpointCategory,
@@ -13,8 +14,12 @@ import {
   type SessionRunStatus,
   type Turn,
   type TurnIntent,
+  type UndoAvailability,
+  type UndoResult,
 } from "../../shared/types.js";
+import { join } from "node:path";
 import type { RuntimeEvent } from "../runtime/adapter.js";
+import { changedFiles, restoreFiles, snapshotWorkspace } from "../runtime/git-snapshot.js";
 import type { RuntimeSet } from "../runtime/set.js";
 import type { Store } from "../store.js";
 import { parseIntent } from "./intent.js";
@@ -57,6 +62,17 @@ const EMPTY_INTENT_TEXT: Record<TurnIntent, string> = {
 /** Sent for the developer when Peer continues engaged work in a writable turn (sandboxFixedPerTurn). */
 export const CONTINUATION_TEXT = "Code changes are now unlocked. Continue the task from where you stopped and implement what we agreed.";
 
+/** Told to an agent that still has undone turns in its context (Claude Code, Codex). */
+export function undoneNote(turns: number): string {
+  const which = turns === 1 ? "your previous turn" : `your previous ${turns} turns`;
+  return `Undone by the developer: ${which}. Every file change from that work was reverted, so the workspace is back to how it was before it. Treat that work as discarded; do not assume any of it is still in place, and re-read files before relying on them.`;
+}
+
+export interface EngineOptions {
+  /** Where per-session git snapshot indexes live. Without it, turns are not recorded and cannot be undone. */
+  snapshotDir?: string;
+}
+
 /**
  * Decides how the developer and the agent work together on each turn:
  * which policy applies, whether code changes are gated, which questions reach the developer,
@@ -77,11 +93,21 @@ export class CollaborationEngine {
   private readonly stoppedTurns = new Set<string>();
   /** Session id -> turn whose continuation is scheduled. Stop cancels it. */
   private readonly pendingContinuations = new Map<string, string>();
+  /** Session id -> its latest workspace snapshot; they share an index file, so they run one at a time. */
+  private readonly snapshots = new Map<string, Promise<unknown>>();
+  /** Sessions whose last turn is being undone; no turn starts meanwhile. */
+  private readonly undoing = new Set<string>();
+  /**
+   * Session id -> the end of its last turn being recorded. The session counts as busy until then,
+   * so nothing the developer does after Peer shows it idle can be mistaken for the agent's work.
+   */
+  private readonly finishing = new Map<string, Promise<void>>();
 
   constructor(
     private readonly store: Store,
     private readonly runtimes: RuntimeSet,
     private readonly emit: (event: PeerEvent) => void,
+    private readonly opts: EngineOptions = {},
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -122,7 +148,9 @@ export class CollaborationEngine {
   handleRuntimeEvent(event: RuntimeEvent) {
     if (event.type === "session.status") {
       const session = this.store.getSessionByRuntimeId(event.sessionId);
-      if (session) this.runStatus.set(session.id, event.status);
+      // A turn ends with session.idle (OpenCode reports an idle status just before it); until
+      // then the session stays busy, so no new turn can overlap it.
+      if (session && !(event.status === "idle" && this.activeTurn(session.id))) this.runStatus.set(session.id, event.status);
     }
     if (event.type === "session.error") {
       const session = this.store.getSessionByRuntimeId(event.sessionId);
@@ -143,7 +171,18 @@ export class CollaborationEngine {
   }
 
   statusOf(sessionId: string): SessionRunStatus {
+    if (this.finishing.has(sessionId)) return "busy";
     return this.runStatus.get(sessionId) ?? "idle";
+  }
+
+  /** Resolves once the session's last turn is fully recorded (report idle only after this). */
+  settled(sessionId: string): Promise<void> {
+    return this.finishing.get(sessionId) ?? Promise.resolve();
+  }
+
+  /** The session has a turn that has not ended (the runtime may already say it is idle). */
+  hasActiveTurn(sessionId: string): boolean {
+    return this.activeTurn(sessionId) !== null;
   }
 
   // ---------------------------------------------------------------------------
@@ -174,6 +213,7 @@ export class CollaborationEngine {
     if (this.statusOf(sessionId) !== "idle") {
       throw new EngineError("The agent is still working. Wait for it to finish or stop it first.", 409);
     }
+    if (this.undoing.has(sessionId)) throw new EngineError("Peer is undoing the last turn. Send your message once it is done.", 409);
     const { intent, text } = parseIntent(rawText, explicitIntent);
     const turn = await this.startTurn(session, text || EMPTY_INTENT_TEXT[intent], intent, false);
     return { kind: "turn-started", turn };
@@ -193,7 +233,13 @@ export class CollaborationEngine {
     // Start after the idle event has reached subscribers, so the UI sees idle, then busy. If the
     // developer started a turn in between, their message takes over; if they pressed Stop, nothing runs.
     this.pendingContinuations.set(sessionId, turnId);
-    setImmediate(() => {
+    // Once the ended turn is recorded and its idle has gone out (the service reports idle on the same promise).
+    const later = (run: () => void) => {
+      const recording = this.finishing.get(sessionId);
+      if (recording) void recording.then(() => setImmediate(run));
+      else setImmediate(run);
+    };
+    later(() => {
       if (this.pendingContinuations.get(sessionId) !== turnId) return;
       this.pendingContinuations.delete(sessionId);
       if (this.store.latestTurn(sessionId)?.id !== turnId || this.statusOf(sessionId) !== "idle") return;
@@ -231,17 +277,35 @@ export class CollaborationEngine {
     this.runStatus.set(session.id, "busy");
     this.emit({ type: "session.status", sessionId: session.id, status: "busy" });
     this.emit({ type: "gate.updated", sessionId: session.id, gate: this.gateFor(session.id) });
+    // An agent that still remembers undone turns hears about them once, on its next turn.
+    const untold = this.store.takeUndoneUntold(session.id);
     try {
       const runtime = this.runtimes.get(session.runtime);
-      await runtime.prompt(this.directoryOf(session), session.runtimeSessionId, {
+      const directory = this.directoryOf(session);
+      // The workspace before the agent touches it, so the turn can be undone.
+      this.store.setTurnTree(turn.id, "start", await this.snapshot(session.id, directory));
+      // Stopped while the snapshot ran: the runtime never hears of this turn.
+      if (this.activeTurn(session.id)?.id !== turn.id) {
+        if (untold > 0) this.store.addUndoneUntold(session.id, untold);
+        this.store.markTurnsUndone([turn.id]);
+        this.runStatus.set(session.id, "idle");
+        this.emit({ type: "session.status", sessionId: session.id, status: "idle" });
+        return turn;
+      }
+      const system = composeSystemPrompt(plan, runtime.checkpointTool);
+      await runtime.prompt(directory, session.runtimeSessionId, {
         text,
-        system: composeSystemPrompt(plan, runtime.checkpointTool),
+        system: untold > 0 ? `${system}\n\n${undoneNote(untold)}` : system,
         gate: plan.gate,
         model: session.model,
+        network: this.store.getWorkspace(session.workspaceId)?.sandboxNetwork ?? false,
         // Peer checkpoints replace the runtime's generic question tool.
         tools: { question: false },
       });
     } catch (err) {
+      if (untold > 0) this.store.addUndoneUntold(session.id, untold);
+      // It never ran, so there is nothing to undo.
+      this.store.markTurnsUndone([turn.id]);
       this.store.endTurn(turn.id);
       this.runStatus.set(session.id, "idle");
       this.emit({ type: "session.status", sessionId: session.id, status: "idle" });
@@ -268,6 +332,7 @@ export class CollaborationEngine {
     const turn = this.store.latestTurn(sessionId);
     if (!turn || turn.endedAt !== null) return;
     this.store.endTurn(turn.id);
+    this.recordTurnEnd(sessionId, turn.id);
     // A checkpoint cannot outlive its run.
     for (const cp of this.store.listCheckpointsForTurn(turn.id)) {
       if (cp.status === "pending" && !this.live.has(cp.id)) {
@@ -523,6 +588,118 @@ export class CollaborationEngine {
       }
       case "cancelled":
         return `The checkpoint was cancelled: ${r.note}.`;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Undo
+
+  /**
+   * A git tree of the workspace now, or null outside git (or without a snapshot dir). Snapshots of
+   * one session run one after another, so an undo can wait for the end of the last turn.
+   */
+  private snapshot(sessionId: string, directory: string): Promise<string | null> {
+    const dir = this.opts.snapshotDir;
+    if (!dir) return Promise.resolve(null);
+    const next = (this.snapshots.get(sessionId) ?? Promise.resolve()).then(() => snapshotWorkspace(directory, join(dir, `${sessionId}.index`)));
+    this.snapshots.set(sessionId, next.catch(() => null));
+    return next;
+  }
+
+  /** Record how the workspace looked when a turn ended (what undo compares later edits against). */
+  private recordTurnEnd(sessionId: string, turnId: string) {
+    const session = this.store.getSession(sessionId);
+    if (!session || !this.store.turnTrees(turnId).start) return;
+    let directory: string;
+    try {
+      directory = this.directoryOf(session);
+    } catch {
+      return;
+    }
+    // Peer may be shutting down (store closed) by the time the snapshot is done; then it is simply not recorded.
+    const done: Promise<void> = this.snapshot(sessionId, directory)
+      .then((tree) => this.store.setTurnTree(turnId, "end", tree))
+      .catch(() => {})
+      .finally(() => {
+        if (this.finishing.get(sessionId) === done) this.finishing.delete(sessionId);
+      });
+    this.finishing.set(sessionId, done);
+  }
+
+  /** The turns one undo takes back: the latest kept turn, and the turns a continuation carried on. */
+  private undoChain(sessionId: string): Turn[] {
+    const latest = this.store.latestKeptTurn(sessionId);
+    if (!latest) return [];
+    const chain = [latest];
+    for (let t = latest; t.continuedFrom; ) {
+      const prev = this.store.getTurn(t.continuedFrom);
+      if (!prev || prev.undoneAt !== null) break;
+      chain.push(prev);
+      t = prev;
+    }
+    return chain;
+  }
+
+  undoAvailability(sessionId: string): UndoAvailability {
+    const no = (reason: string) => ({ available: false, reason });
+    if (this.statusOf(sessionId) !== "idle" || this.activeTurn(sessionId)) return no("Wait for the agent to finish this turn.");
+    if (this.undoing.has(sessionId)) return no("Undoing…");
+    const chain = this.undoChain(sessionId);
+    if (chain.length === 0) return no(NOTHING_TO_UNDO);
+    if (!this.opts.snapshotDir || !this.store.turnTrees(chain.at(-1)!.id).start) return no("Undo needs the project to be a git repository when the turn starts.");
+    return { available: true, reason: null };
+  }
+
+  /**
+   * Undo the session's last turn: every file that changed while it ran goes back to how it was
+   * before it, and the turn leaves the conversation (or, if the runtime keeps it, the agent is told
+   * on its next turn). Refuses, changing nothing, when one of those files changed again since.
+   */
+  async undoLastTurn(sessionId: string): Promise<UndoResult> {
+    const session = this.requireSession(sessionId);
+    const availability = this.undoAvailability(sessionId);
+    if (!availability.available) throw new EngineError(availability.reason ?? "Nothing to undo.", 409);
+    this.undoing.add(sessionId);
+    try {
+      const chain = this.undoChain(sessionId);
+      const first = chain.at(-1)!;
+      const latest = chain[0]!;
+      const directory = this.directoryOf(session);
+      const now = await this.snapshot(sessionId, directory); // also waits for the turn's end snapshot
+      const start = this.store.turnTrees(first.id).start;
+      const end = this.store.turnTrees(latest.id).end;
+      if (!start || !now) throw new EngineError("Undo needs the project to be a git repository.", 409);
+      if (!end) throw new EngineError("Peer has no record of how this turn ended (Peer or the runtime restarted during it), so it cannot tell the agent's changes from later ones.", 409);
+      // Only the workspace folder, which may be part of a larger repository: the agent works only in
+      // there, and changes elsewhere in the repository are the developer's.
+      const files = await changedFiles(directory, start, end, { insideDirectory: true });
+      const changedSince = new Set(await changedFiles(directory, end, now, { insideDirectory: true }));
+      const conflicts = files.filter((f) => changedSince.has(f));
+      if (conflicts.length > 0) {
+        const list = conflicts.slice(0, 5).join(", ") + (conflicts.length > 5 ? ` and ${conflicts.length - 5} more` : "");
+        throw new EngineError(`Nothing was undone: ${list} changed after the turn ended, and undoing would overwrite that.`, 409);
+      }
+      const indexFile = join(this.opts.snapshotDir!, `${sessionId}.index`);
+      try {
+        await restoreFiles(directory, start, files, indexFile);
+      } catch (err) {
+        // Put back what was there before the undo started, so a failed undo changes nothing.
+        await restoreFiles(directory, now, files, indexFile).catch(() => {});
+        throw new EngineError(`Undo failed and nothing was changed: ${err instanceof Error ? err.message : String(err)}`, 409);
+      }
+      let forgotten = false;
+      try {
+        forgotten = await this.runtimes.get(session.runtime).forgetTurns(directory, session.runtimeSessionId, first.startedAt);
+      } catch (err) {
+        this.store.logEvent(sessionId, "turn.forget_failed", { error: err instanceof Error ? err.message : String(err) });
+      }
+      const turnIds = chain.map((t) => t.id);
+      this.store.markTurnsUndone(turnIds);
+      if (!forgotten) this.store.addUndoneUntold(sessionId, chain.length);
+      this.store.logEvent(sessionId, "turn.undone", { turnIds, files, forgotten });
+      return { files, turns: chain.length, forgotten };
+    } finally {
+      this.undoing.delete(sessionId);
     }
   }
 

@@ -52,12 +52,25 @@ describe("store", () => {
     const first = a.createTurn({ sessionId: s.id, mode: "learn", intent: "default", gate: "engage" });
     const continuation = a.createTurn({ sessionId: s.id, mode: "learn", intent: "default", gate: "open", continuedFrom: first.id });
     // Turn the file back into a database from before the continued_from column, holding one old turn.
-    a.db.exec("ALTER TABLE turns DROP COLUMN continued_from; PRAGMA user_version = 2;");
+    a.db.exec(`
+      ALTER TABLE turns DROP COLUMN continued_from;
+      ALTER TABLE workspaces DROP COLUMN sandbox_network;
+      ALTER TABLE turns DROP COLUMN start_tree;
+      ALTER TABLE turns DROP COLUMN end_tree;
+      ALTER TABLE turns DROP COLUMN undone_at;
+      ALTER TABLE sessions DROP COLUMN undone_untold;
+      ALTER TABLE sessions DROP COLUMN titled_by_developer;
+      PRAGMA user_version = 2;
+    `);
     a.db.prepare("INSERT INTO turns (id, session_id, mode, intent, gate, started_at) VALUES ('turn_old', ?, 'learn', 'default', 'open', 1)").run(s.id);
     a.close();
 
     const b = new Store(file);
     expect(b.getTurn("turn_old")!.continuedFrom).toBeNull();
+    expect(b.getTurn("turn_old")!.undoneAt).toBeNull();
+    expect(b.turnTrees("turn_old")).toEqual({ start: null, end: null });
+    expect(b.getWorkspace(ws.id)!.sandboxNetwork).toBe(false);
+    expect(b.titledByDeveloper(s.id)).toBe(false);
     const again = b.createTurn({ sessionId: s.id, mode: "learn", intent: "default", gate: "open", continuedFrom: first.id });
     b.close();
 

@@ -77,6 +77,8 @@ export interface Workspace {
   id: string;
   path: string;
   name: string;
+  /** Commands in Codex's sandbox may use the network (off by default: tests that open a port fail). */
+  sandboxNetwork: boolean;
   createdAt: number;
   lastOpenedAt: number;
 }
@@ -133,6 +135,8 @@ export interface Turn {
   engagedAt: number | null;
   startedAt: number;
   endedAt: number | null;
+  /** The developer undid this turn (its file changes were reverted). */
+  undoneAt: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +216,8 @@ export interface RuntimeStatus {
   error?: string;
   /** How the runtime's own CLI is signed in, e.g. "Claude Pro" or "ChatGPT". Never an email or a secret. */
   account?: string;
+  /** Something to know that does not stop the runtime, e.g. a CLI version Peer was not tested with. */
+  warning?: string;
 }
 
 /**
@@ -254,8 +260,26 @@ export interface ProviderEntry {
   env: string[];
 }
 
+export type LocalServerKind = "ollama" | "lmstudio" | "custom";
+
+/** A local model server (OpenAI-compatible), added in Peer or detected at its default address. */
+export interface LocalServerInfo {
+  /** The OpenCode provider id once added; null for a detected server that is not added. */
+  id: string | null;
+  name: string;
+  kind: LocalServerKind;
+  baseUrl: string;
+  added: boolean;
+  /** It answered just now. */
+  running: boolean;
+  /** Model ids (for a server that is down: the ones it served last). */
+  models: string[];
+}
+
 export interface ProviderCatalog {
   providers: ProviderEntry[];
+  /** Local model servers; their providers are not in `providers`. */
+  local: LocalServerInfo[];
   /** A connection changed while an OpenCode session was running; models refresh once it is idle. */
   reloadPending: boolean;
 }
@@ -282,6 +306,26 @@ export interface SessionSnapshot {
   checkpoints: Checkpoint[];
   permissions: PermissionRequest[];
   lastError: string | null;
+  /** Whether "Undo last turn" can run now, and why not. */
+  undo: UndoAvailability;
+}
+
+/** The undo reason when the session has no turn left to undo (the UI then hides the button). */
+export const NOTHING_TO_UNDO = "Nothing to undo yet.";
+
+export interface UndoAvailability {
+  available: boolean;
+  reason: string | null;
+}
+
+/** What "Undo last turn" did. */
+export interface UndoResult {
+  /** Files restored to how they were before the turn (repository-relative). */
+  files: string[];
+  /** Turns undone (a task and the continuation that carried it on count as one undo). */
+  turns: number;
+  /** The runtime dropped the turn from the conversation; otherwise the agent is told on its next turn. */
+  forgotten: boolean;
 }
 
 export interface Preferences {
@@ -304,6 +348,8 @@ export type PeerEvent =
   | { type: "session.updated"; session: PeerSession }
   | { type: "session.status"; sessionId: string; status: SessionRunStatus; message?: string }
   | { type: "session.error"; sessionId: string; error: string }
+  /** The session's last turn was undone: its messages, diff and undo state changed. */
+  | { type: "session.undone"; sessionId: string; result: UndoResult }
   | { type: "session.diff"; sessionId: string; diff: FileDiff[] }
   | { type: "message.updated"; sessionId: string; message: PeerMessageInfo }
   | { type: "part.updated"; sessionId: string; messageId: string; part: PeerPart }

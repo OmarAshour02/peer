@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { OAuthStart, ProviderAuthPrompt, ProviderCatalog, ProviderEntry, ProviderSource, RuntimeInfo, RuntimeKind } from "../../shared/types";
+import type { LocalServerInfo, OAuthStart, ProviderAuthPrompt, ProviderCatalog, ProviderEntry, ProviderSource, RuntimeInfo, RuntimeKind } from "../../shared/types";
 import { RUNTIME_UI, statusDot } from "../runtimes";
 import { runtimeInfo, usePeer } from "../store";
 
@@ -117,6 +117,8 @@ export function ProvidersDialog() {
             )}
           </section>
 
+          {ready && catalog && <LocalModels servers={catalog.local} onCatalog={setCatalog} />}
+
           {ready && catalog && (
             <section>
               <SectionTitle>Connect a provider</SectionTitle>
@@ -163,6 +165,103 @@ export function ProvidersDialog() {
   );
 }
 
+/** Ollama, LM Studio and other OpenAI-compatible servers on this machine (or the network). */
+function LocalModels({ servers, onCatalog }: { servers: LocalServerInfo[]; onCatalog: (c: ProviderCatalog) => void }) {
+  const api = usePeer((s) => s.api);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [custom, setCustom] = useState<{ baseUrl: string; name: string } | null>(null);
+
+  async function run(key: string, fn: () => Promise<ProviderCatalog>) {
+    if (!api) return;
+    setBusy(key);
+    setError(null);
+    try {
+      onCatalog(await fn());
+      setCustom(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const add = (s: { baseUrl: string; name?: string; kind?: LocalServerInfo["kind"] }) => run(s.baseUrl, () => api!.addLocalServer("opencode", s));
+  const remove = (s: LocalServerInfo) => s.id && run(s.baseUrl, () => api!.removeLocalServer("opencode", s.id!));
+
+  return (
+    <section>
+      <SectionTitle>Local models</SectionTitle>
+      {servers.map((s) => (
+        <div key={s.baseUrl} className="flex items-center gap-3 border-b border-line/60 py-1.5 text-[13px] last:border-0">
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.running ? "bg-focus" : "bg-line"}`} />
+          <span className="min-w-0 flex-1 truncate" title={s.models.join(", ")}>
+            {s.name} <span className="font-mono text-[11px] text-faint">{s.baseUrl}</span>
+          </span>
+          <span className="shrink-0 text-[11px] text-faint">
+            {s.running
+              ? `${s.models.length} model${s.models.length === 1 ? "" : "s"}`
+              : s.added
+                ? `Not running${s.models.length ? ` · ${s.models.length} known` : ""}`
+                : "Not running"}
+          </span>
+          {s.added ? (
+            <button disabled={busy !== null} onClick={() => void remove(s)} className="shrink-0 text-[11px] text-faint hover:text-danger disabled:opacity-50">
+              Remove
+            </button>
+          ) : (
+            <button
+              disabled={busy !== null || !s.running || s.models.length === 0}
+              title={s.running ? undefined : `Start ${s.name} first`}
+              onClick={() => void add({ baseUrl: s.baseUrl, name: s.name, kind: s.kind })}
+              className="shrink-0 text-[11px] text-accent hover:underline disabled:text-faint disabled:no-underline"
+            >
+              {busy === s.baseUrl ? "Adding…" : "Add"}
+            </button>
+          )}
+        </div>
+      ))}
+      {custom ? (
+        <form
+          className="mt-2 flex items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void add({ baseUrl: custom.baseUrl, name: custom.name || undefined });
+          }}
+        >
+          <input
+            autoFocus
+            value={custom.baseUrl}
+            onChange={(e) => setCustom({ ...custom, baseUrl: e.target.value })}
+            placeholder="http://127.0.0.1:8080/v1"
+            className="min-w-0 flex-1 rounded-md border border-line bg-bg px-2 py-1 font-mono text-[12px] outline-none focus:border-accent"
+          />
+          <input
+            value={custom.name}
+            onChange={(e) => setCustom({ ...custom, name: e.target.value })}
+            placeholder="Name (optional)"
+            className="w-32 rounded-md border border-line bg-bg px-2 py-1 text-[12px] outline-none focus:border-accent"
+          />
+          <button type="submit" disabled={!custom.baseUrl.trim() || busy !== null} className="rounded-md bg-accent px-2.5 py-1 text-[12px] font-medium text-bg disabled:opacity-40">
+            {busy ? "Adding…" : "Add"}
+          </button>
+          <button type="button" onClick={() => setCustom(null)} className="text-[11px] text-faint hover:text-fg">
+            Cancel
+          </button>
+        </form>
+      ) : (
+        <button onClick={() => setCustom({ baseUrl: "", name: "" })} className="mt-1 text-[12px] text-accent hover:underline">
+          + Another OpenAI-compatible server…
+        </button>
+      )}
+      {error && <div className="mt-2 text-[12px] text-danger">{error}</div>}
+      <p className="mt-2 text-[11px] text-faint">
+        Pick a model that supports tool calls (e.g. Qwen3 Coder). Ollama's default context window is small for a coding agent; start it with OLLAMA_CONTEXT_LENGTH=32768 or more.
+      </p>
+    </section>
+  );
+}
+
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">{children}</div>;
 }
@@ -183,7 +282,10 @@ function RuntimeRow({ runtime: r, connectedCount }: { runtime: RuntimeInfo; conn
     <div className="flex items-start gap-3 py-1.5 text-[13px]">
       <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${statusDot(r.status)}`} />
       <span className="w-24 shrink-0">{ui.label}</span>
-      <span className={`min-w-0 flex-1 text-[12px] ${state === "ready" ? "text-muted" : "text-faint"}`}>{detail}</span>
+      <span className={`min-w-0 flex-1 text-[12px] ${state === "ready" ? "text-muted" : "text-faint"}`}>
+        {detail}
+        {state === "ready" && r.status.warning && <span className="mt-0.5 block text-[11px] text-warn">{r.status.warning}</span>}
+      </span>
       {(state === "unavailable" || state === "error") && (
         // Only offered when the runtime is down, so no session is interrupted.
         <button onClick={() => api && void api.restartRuntime(r.kind).catch(() => {})} className="shrink-0 text-[11px] text-accent hover:underline">
