@@ -312,6 +312,7 @@ export class CollaborationEngine {
         gate: plan.gate,
         model: session.model,
         network: this.store.getWorkspace(session.workspaceId)?.sandboxNetwork ?? false,
+        autoApprovals: session.autoApprovals,
         // Peer checkpoints replace the runtime's generic question tool.
         tools: { question: false },
       });

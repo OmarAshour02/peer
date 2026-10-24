@@ -53,7 +53,7 @@ Peer doesn't ask about what you already decided. An option you picked, or a plan
 - Respect the developer's expertise. Ask only questions whose answers change the outcome.
 - Consequential decisions belong to the human; mechanical work does not need them.
 - The developer can always delegate (**Just do it** / **You decide**), skip a discussion (**Skip to implementation**), ask for a **Hint**, or demand a **Direct answer**.
-- **Safety is separate from collaboration.** Destructive commands (`rm`, `git push`, `git reset --hard`, `sudo`, …) always ask for permission, and access outside the chosen workspace is denied. This holds in every mode; Focus never bypasses it.
+- **Safety is separate from collaboration.** Destructive commands (`rm`, `git push`, `git reset --hard`, `sudo`, …) always ask for permission. Access outside the chosen workspace is denied on OpenCode and asks you on Claude Code and Codex; with **Auto approvals** on, Claude Code's classifier may approve it without asking. This holds in every mode; Focus never bypasses it.
 
 ## What is enforced and what is guidance
 
@@ -75,7 +75,7 @@ Peer is explicit about this distinction.
 | Gate on tool calls | Peer plugin, `tool.execute.before` | Peer `PreToolUse` hook (subagents included) | Peer is Codex's approver (approval policy `untrusted`): commands and file changes it doesn't consider safe come to Peer, which declines them while the gate is locked. Turns that start gated also run in Codex's **read-only sandbox**, so the OS blocks writes too. Codex fixes the sandbox for a whole turn, so when you engage mid-turn Peer ends that turn and continues the work in a new turn with write access |
 | Checkpoints | plugin tool `peer_checkpoint` | in-process MCP tool `mcp__peer__checkpoint` | client-side ("dynamic") tool `peer_checkpoint` |
 | Destructive commands | OpenCode permission rules (ask) | hook forces an approval → Peer permission card | Peer sends them to the developer as a permission card |
-| Other approvals | OpenCode's own rules | Claude Code's own permission rules and modes (edits inside the workspace are pre-approved, like in the other runtimes); its prompts become Peer permission cards | Peer approves plain in-workspace commands and edits; network access, sandbox escalation, writes outside the workspace and permission requests go to the developer |
+| Other approvals | OpenCode's own rules | Claude Code's own permission rules and modes (edits inside the workspace are pre-approved, like in the other runtimes); its prompts become Peer permission cards. "Always allow" keeps what Claude Code grants for its session for the whole Peer session, and the card shows what it saves. **Auto approvals** (per session, off by default): Claude Code's auto mode, whose classifier settles prompts and asks only when unsure | Peer approves plain in-workspace commands and edits; network access, sandbox escalation, writes outside the workspace and permission requests go to the developer |
 | Per-turn policy | `system` prompt per message | appended to Claude Code's system prompt per turn | sent as a tagged block with each message (Codex only takes instructions per thread) |
 | Runtime's own question tool | disabled | `AskUserQuestion` disabled | `request_user_input` refused |
 

@@ -127,6 +127,10 @@ const MIGRATIONS: string[] = [
   ALTER TABLE checkpoints ADD COLUMN source TEXT NOT NULL DEFAULT 'agent';
   ALTER TABLE checkpoints ADD COLUMN decision TEXT;
   `,
+  `
+  -- The runtime settles its own permission prompts where it can (Claude Code's auto mode).
+  ALTER TABLE sessions ADD COLUMN auto_approvals INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 type Row = Record<string, unknown>;
@@ -230,7 +234,8 @@ export class Store {
     model: ModelRef | null;
   }): PeerSession {
     const now = Date.now();
-    const session: PeerSession = { id: newId("ps"), ...input, createdAt: now, updatedAt: now };
+    // Auto approvals start off; the developer turns them on per session.
+    const session: PeerSession = { id: newId("ps"), ...input, autoApprovals: false, createdAt: now, updatedAt: now };
     this.db
       .prepare(
         `INSERT INTO sessions (id, workspace_id, runtime, runtime_session_id, title, mode, model_provider, model_id, created_at, updated_at)
@@ -251,7 +256,7 @@ export class Store {
     return session;
   }
 
-  updateSession(id: string, patch: { title?: string; mode?: CollaborationModeId; model?: ModelRef | null }): PeerSession {
+  updateSession(id: string, patch: { title?: string; mode?: CollaborationModeId; model?: ModelRef | null; autoApprovals?: boolean }): PeerSession {
     const current = this.getSession(id);
     if (!current) throw new Error(`Unknown session ${id}`);
     const next: PeerSession = {
@@ -259,11 +264,12 @@ export class Store {
       title: patch.title ?? current.title,
       mode: patch.mode ?? current.mode,
       model: patch.model === undefined ? current.model : patch.model,
+      autoApprovals: patch.autoApprovals ?? current.autoApprovals,
       updatedAt: Date.now(),
     };
     this.db
-      .prepare("UPDATE sessions SET title = ?, mode = ?, model_provider = ?, model_id = ?, updated_at = ? WHERE id = ?")
-      .run(next.title, next.mode, next.model?.providerId ?? null, next.model?.modelId ?? null, next.updatedAt, id);
+      .prepare("UPDATE sessions SET title = ?, mode = ?, model_provider = ?, model_id = ?, auto_approvals = ?, updated_at = ? WHERE id = ?")
+      .run(next.title, next.mode, next.model?.providerId ?? null, next.model?.modelId ?? null, next.autoApprovals ? 1 : 0, next.updatedAt, id);
     return next;
   }
 
@@ -533,6 +539,7 @@ function toSession(r: Row): PeerSession {
     title: String(r.title),
     mode: r.mode as CollaborationModeId,
     model: r.model_provider && r.model_id ? { providerId: String(r.model_provider), modelId: String(r.model_id) } : null,
+    autoApprovals: Number(r.auto_approvals ?? 0) === 1,
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
   };

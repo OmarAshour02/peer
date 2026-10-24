@@ -125,6 +125,11 @@ export interface PromptInput {
   model?: ModelRef | null;
   /** Commands may use the network inside the runtime's OS sandbox (Codex; others have no sandbox). */
   network?: boolean;
+  /**
+   * Let the runtime settle its own permission prompts where it can (Claude Code: auto mode).
+   * Runtimes without such a mode ignore it. Peer's gate and safety approvals are unaffected.
+   */
+  autoApprovals?: boolean;
   /** Tools to enable/disable for this turn. */
   tools?: Record<string, boolean>;
 }
