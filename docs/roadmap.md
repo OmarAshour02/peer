@@ -10,13 +10,18 @@
 
 - Sessions run on OpenCode (bundled), Claude Code (user's CLI via the Claude Agent SDK) or Codex (user's CLI via `codex app-server`), picked per session, with the same modes, gate, checkpoints, safety rules and restart recovery. Verified with real Learn and Focus runs on both, restart + resume, permission approval, and Stop.
 
+## Done: model-agnostic and runtime polish
+
+- *Models & providers*: connect OpenCode providers in-app; local models (Ollama, LM Studio, any OpenAI-compatible server); provider keys exported in the login shell reach OpenCode.
+- Per-workspace network switch for Codex's sandbox; warnings for Claude Code / Codex versions outside the tested range.
+- Rename and delete sessions; undo the last turn (files on every runtime, conversation on OpenCode).
+
 ## Next: more runtimes and runtime polish
 
 1. **More agents** behind the same adapter interface: Gemini CLI, Cursor, or anything speaking the Agent Client Protocol (ACP), which T3 Code also uses for some providers.
-2. **Codex sandbox options.** Codex's default sandbox blocks network, which includes binding a local port, so test suites that start a server fail (seen in verification). Offer a per-workspace "allow network in the sandbox" switch instead of changing Codex's default.
-3. **Gate MCP tools on Codex before they run.** Today Peer stops the turn after a locked-gate MCP call starts. Prevention needs Codex to ask its client before MCP calls, or Peer to proxy the developer's MCP servers.
-4. **Version drift.** Check Claude Code / Codex versions against the tested range and warn; the Codex dynamic-tool API is experimental.
-5. **Runtime settings in the UI**: CLI paths, Claude permission mode, Codex reasoning effort.
+2. **Gate MCP tools on Codex before they run.** Today Peer stops the turn after a locked-gate MCP call starts. Prevention needs Codex to ask its client before MCP calls, or Peer to proxy the developer's MCP servers.
+3. **Undo that truncates the CLI session.** Undo drops a Claude Code or Codex turn from Peer's transcript, but the CLI session keeps it (the agent is told instead). Truncate it there too: Claude's `resumeSessionAt` / `resumeDropsTurn`, Codex's `thread/revert` (`beforeTurnId`, in 0.163 but untested).
+4. **Runtime settings in the UI**: CLI paths, Claude permission mode, Codex reasoning effort.
 
 ## Next: Milestone 4, collaboration quality
 
@@ -27,11 +32,10 @@
 2. **Collaborate approach gate.** An optional "agree before significant edits" gate for Collaborate, triggered by a diff-size or file-count threshold instead of always being on.
 3. **Adaptive policy.** Adjust per-developer budgets and categories from history. For example, if a developer always presses *You decide* for trade-offs, stop asking about them.
 4. **Session UX.**
-   - Rename and delete sessions.
    - Reopen runtime sub-sessions (subagents).
    - Show checkpoint history per file.
-   - Revert a turn (OpenCode supports revert).
-5. **Model handling.** Per-mode default models, and clearer provider-auth flows by integrating OpenCode's provider auth endpoints rather than adding Peer's own key storage.
+   - Redo after undo (OpenCode has `unrevert`; others would restore the turn's end tree).
+5. **Model handling.** Per-mode default models. Per-model context limits for local models (OpenCode compacts by them).
 6. **Updates.** Auto-update via electron-builder (zip + `latest-mac.yml` / AppImage update info). Publish signed builds from tagged CI runs.
 
 ## Later: Learning Space

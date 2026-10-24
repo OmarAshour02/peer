@@ -26,6 +26,7 @@ import type { AgentRuntimeAdapter, PromptInput, RuntimeEvent, RuntimeHooks } fro
 import { findExecutable, runCli } from "../cli.js";
 import { diffSinceSnapshot, snapshotWorkspace } from "../git-snapshot.js";
 import { Transcript, titleFromPrompt, type RuntimeStorage } from "../transcript.js";
+import { TESTED_VERSIONS, versionWarning } from "../versions.js";
 import { CLAUDE_CHECKPOINT_TOOL, peerToolInput, peerToolName, toolResultDiff, toolResultText } from "./normalize.js";
 
 /** The SDK version Peer is built against; it tracks Claude Code CLI 2.1.x. */
@@ -86,6 +87,27 @@ const FALLBACK_MODELS = [
  * included) and forces an approval for destructive shell commands; approvals Claude Code asks
  * for reach the developer as Peer permission cards; checkpoints are an in-process MCP tool.
  */
+/** The parts of `claude auth status --json` Peer reads (it also prints the account email, which Peer does not show). */
+export interface ClaudeAuthStatus {
+  loggedIn?: boolean;
+  authMethod?: string;
+  apiProvider?: string;
+  subscriptionType?: string;
+}
+
+const CLAUDE_API_PROVIDERS: Record<string, string> = { bedrock: "Amazon Bedrock", vertex: "Google Vertex AI", foundry: "Microsoft Foundry" };
+
+/** How Claude Code is signed in, for the UI: "Claude Pro", "Anthropic API key", "Amazon Bedrock", ... */
+export function claudeAccount(info: ClaudeAuthStatus, loggedIn: boolean): string {
+  if (info.apiProvider && info.apiProvider !== "firstParty") return CLAUDE_API_PROVIDERS[info.apiProvider] ?? info.apiProvider;
+  if (!loggedIn) return "ANTHROPIC_API_KEY";
+  if (info.authMethod === "claude.ai") {
+    const plan = info.subscriptionType ? info.subscriptionType.charAt(0).toUpperCase() + info.subscriptionType.slice(1) : "";
+    return plan ? `Claude ${plan}` : "Claude account";
+  }
+  return "Anthropic API key";
+}
+
 export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   readonly kind = "claude" as const;
   readonly name = "Claude Code";
@@ -138,18 +160,24 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       return;
     }
     const auth = await runCli(this.binary, ["auth", "status", "--json"], this.opts.env);
-    let loggedIn = false;
+    let info: ClaudeAuthStatus = {};
     try {
-      const info = JSON.parse(auth.stdout) as { loggedIn?: boolean; apiProvider?: string };
-      loggedIn = Boolean(info.loggedIn) || (info.apiProvider !== undefined && info.apiProvider !== "firstParty");
+      info = JSON.parse(auth.stdout) as ClaudeAuthStatus;
     } catch {
-      loggedIn = false;
+      info = {};
     }
+    const loggedIn = Boolean(info.loggedIn) || (info.apiProvider !== undefined && info.apiProvider !== "firstParty");
     if (!loggedIn && !this.opts.env.ANTHROPIC_API_KEY) {
       this.setStatus({ state: "unavailable", error: "Claude Code is not logged in. Run `claude auth login` in a terminal, then restart this runtime." });
       return;
     }
-    this.setStatus({ state: "ready", version: version.stdout.trim().split(/\s/)[0] });
+    const installed = version.stdout.trim().split(/\s/)[0];
+    this.setStatus({
+      state: "ready",
+      version: installed,
+      account: claudeAccount(info, loggedIn),
+      warning: versionWarning("Claude Code", installed, TESTED_VERSIONS.claude, "`claude update`"),
+    });
   }
 
   async stop(): Promise<void> {
@@ -239,6 +267,16 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   async getDiff(directory: string, sessionId: string) {
     const base = this.state(sessionId).baseline;
     return base ? diffSinceSnapshot(directory, base, this.indexFile(sessionId)) : [];
+  }
+
+  /**
+   * Undo drops the turns from Peer's transcript. The CLI's own session keeps them, so the agent
+   * still remembers that work and is told on its next turn that it was undone.
+   */
+  async forgetTurns(_directory: string, sessionId: string, since: number): Promise<boolean> {
+    if (this.runs.has(sessionId)) throw new Error("The agent is still working on this session.");
+    this.transcript(sessionId).dropSince(since);
+    return false;
   }
 
   async getParentSessionId(): Promise<string | null> {

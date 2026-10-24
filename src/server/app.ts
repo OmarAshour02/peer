@@ -10,6 +10,7 @@ import {
   TURN_INTENTS,
   type CheckpointAction,
   type CollaborationModeId,
+  type LocalServerKind,
   type RuntimeKind,
   type ModelRef,
   type PeerEvent,
@@ -19,6 +20,7 @@ import {
 import { EngineError } from "./collaboration/engine.js";
 import { POLICIES } from "./collaboration/policies.js";
 import type { EventHub } from "./hub.js";
+import { ProviderError, type ProviderConnections } from "./runtime/adapter.js";
 import type { PeerService } from "./service.js";
 import { WorkspaceError } from "./workspaces.js";
 
@@ -52,13 +54,21 @@ function safeEqual(a: string, b: string): boolean {
 
 function fail(c: Context, err: unknown) {
   if (err instanceof EngineError) return c.json({ error: err.message }, err.status);
-  if (err instanceof WorkspaceError) return c.json({ error: err.message }, 400);
+  if (err instanceof WorkspaceError || err instanceof ProviderError) return c.json({ error: err.message }, 400);
   const message = err instanceof Error ? err.message : String(err);
   return c.json({ error: message }, 500);
 }
 
 const isMode = (m: unknown): m is CollaborationModeId => COLLABORATION_MODES.includes(m as CollaborationModeId);
 const isIntent = (i: unknown): i is TurnIntent => TURN_INTENTS.includes(i as TurnIntent);
+
+/** Answers to a login method's prompts: a flat string map. */
+function parseInputs(v: unknown): Record<string, string> | null {
+  if (v === undefined) return {};
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const entries = Object.entries(v);
+  return entries.every(([, x]) => typeof x === "string") ? (Object.fromEntries(entries) as Record<string, string>) : null;
+}
 
 function parseModel(m: unknown): ModelRef | null | undefined {
   if (m === null) return null;
@@ -155,7 +165,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   api.get("/policies", (c) => c.json(POLICIES));
-  api.get("/preferences", (c) => c.json(service.store.getPreferences()));
+  api.get("/preferences", (c) => c.json(service.preferences()));
   api.patch("/preferences", async (c) => {
     const body = await c.req.json<{ defaultMode?: unknown; defaultRuntime?: unknown; lastSessionId?: unknown }>();
     if (body.defaultMode !== undefined && !isMode(body.defaultMode)) return c.json({ error: "Unknown mode" }, 400);
@@ -165,13 +175,12 @@ export function createApp(deps: AppDeps): Hono {
     if (body.lastSessionId !== undefined && body.lastSessionId !== null && typeof body.lastSessionId !== "string") {
       return c.json({ error: "Invalid lastSessionId" }, 400);
     }
-    return c.json(
-      service.store.setPreferences({
-        defaultMode: body.defaultMode as CollaborationModeId | undefined,
-        defaultRuntime: body.defaultRuntime as RuntimeKind | undefined,
-        lastSessionId: body.lastSessionId as string | null | undefined,
-      }),
-    );
+    service.store.setPreferences({
+      defaultMode: body.defaultMode as CollaborationModeId | undefined,
+      defaultRuntime: body.defaultRuntime as RuntimeKind | undefined,
+      lastSessionId: body.lastSessionId as string | null | undefined,
+    });
+    return c.json(service.preferences());
   });
 
   api.get("/workspaces", (c) => c.json(service.store.listWorkspaces()));
@@ -179,6 +188,15 @@ export function createApp(deps: AppDeps): Hono {
     try {
       const body = await c.req.json<{ path?: unknown }>();
       return c.json(service.addWorkspace(body.path));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+  api.patch("/workspaces/:id", async (c) => {
+    try {
+      const body = await c.req.json<{ sandboxNetwork?: unknown }>();
+      if (body.sandboxNetwork !== undefined && typeof body.sandboxNetwork !== "boolean") return c.json({ error: "sandboxNetwork must be true or false" }, 400);
+      return c.json(service.updateWorkspace(c.req.param("id"), { sandboxNetwork: body.sandboxNetwork }));
     } catch (err) {
       return fail(c, err);
     }
@@ -210,7 +228,7 @@ export function createApp(deps: AppDeps): Hono {
   api.get("/workspaces/:id/models", async (c) => {
     const ws = service.store.getWorkspace(c.req.param("id"));
     if (!ws) return c.json({ error: "Unknown workspace" }, 404);
-    const kind = c.req.query("runtime") ?? service.store.getPreferences().defaultRuntime;
+    const kind = c.req.query("runtime") ?? service.preferences().defaultRuntime;
     if (!service.runtimes.has(kind)) return c.json({ error: `Unknown runtime ${kind}` }, 400);
     try {
       return c.json(await service.runtimes.get(kind).listModels(ws.path));
@@ -218,6 +236,76 @@ export function createApp(deps: AppDeps): Hono {
       return fail(c, err);
     }
   });
+
+  // Model providers of runtimes Peer can connect itself (OpenCode). Credentials only flow in:
+  // no response carries one.
+  const withProviders = async (c: Context, run: (providers: ProviderConnections) => Promise<Response>) => {
+    const kind = c.req.param("kind") ?? "";
+    if (!service.runtimes.has(kind)) return c.json({ error: `Unknown runtime ${kind}` }, 404);
+    const runtime = service.runtimes.get(kind);
+    if (!runtime.providers) return c.json({ error: `${runtime.name} manages its own login.` }, 404);
+    if (runtime.status().state !== "ready") return c.json({ error: `${runtime.name} is not running.` }, 409);
+    try {
+      return await run(runtime.providers);
+    } catch (err) {
+      return fail(c, err);
+    }
+  };
+  api.get("/runtimes/:kind/providers", (c) => withProviders(c, async (p) => c.json(await p.catalog())));
+  api.post("/runtimes/:kind/providers/:id/key", (c) =>
+    withProviders(c, async (p) => {
+      const body = await c.req.json<{ key?: unknown; inputs?: unknown }>();
+      const key = typeof body.key === "string" ? body.key.trim() : "";
+      const inputs = parseInputs(body.inputs);
+      if (!key || key.length > 10_000) return c.json({ error: "Enter an API key." }, 400);
+      if (!inputs) return c.json({ error: "Invalid inputs" }, 400);
+      await p.setKey(c.req.param("id"), key, inputs);
+      return c.json(await p.catalog());
+    }),
+  );
+  api.post("/runtimes/:kind/providers/:id/oauth", (c) =>
+    withProviders(c, async (p) => {
+      const body = await c.req.json<{ method?: unknown; inputs?: unknown }>();
+      const inputs = parseInputs(body.inputs);
+      if (!Number.isInteger(body.method) || (body.method as number) < 0) return c.json({ error: "Invalid method" }, 400);
+      if (!inputs) return c.json({ error: "Invalid inputs" }, 400);
+      return c.json(await p.startOAuth(c.req.param("id"), body.method as number, inputs));
+    }),
+  );
+  api.post("/runtimes/:kind/providers/:id/oauth/callback", (c) =>
+    withProviders(c, async (p) => {
+      const body = await c.req.json<{ method?: unknown; code?: unknown }>();
+      if (!Number.isInteger(body.method) || (body.method as number) < 0) return c.json({ error: "Invalid method" }, 400);
+      if (body.code !== undefined && typeof body.code !== "string") return c.json({ error: "Invalid code" }, 400);
+      const code = typeof body.code === "string" ? body.code.trim() || undefined : undefined;
+      await p.finishOAuth(c.req.param("id"), body.method as number, code);
+      return c.json(await p.catalog());
+    }),
+  );
+  api.delete("/runtimes/:kind/providers/:id", (c) =>
+    withProviders(c, async (p) => {
+      await p.disconnect(c.req.param("id"));
+      return c.json(await p.catalog());
+    }),
+  );
+
+  // Local model servers (Ollama, LM Studio, any OpenAI-compatible address).
+  api.post("/runtimes/:kind/local-servers", (c) =>
+    withProviders(c, async (p) => {
+      const body = await c.req.json<{ baseUrl?: unknown; name?: unknown; kind?: unknown }>();
+      if (typeof body.baseUrl !== "string" || body.baseUrl.length > 2000) return c.json({ error: "Enter the server's address." }, 400);
+      if (body.name !== undefined && typeof body.name !== "string") return c.json({ error: "Invalid name" }, 400);
+      if (body.kind !== undefined && !["ollama", "lmstudio", "custom"].includes(body.kind as string)) return c.json({ error: "Invalid kind" }, 400);
+      await p.addLocal({ baseUrl: body.baseUrl, name: body.name as string | undefined, kind: body.kind as LocalServerKind | undefined });
+      return c.json(await p.catalog());
+    }),
+  );
+  api.delete("/runtimes/:kind/local-servers/:id", (c) =>
+    withProviders(c, async (p) => {
+      await p.removeLocal(c.req.param("id"));
+      return c.json(await p.catalog());
+    }),
+  );
 
   api.get("/sessions/:id", (c) => {
     try {
@@ -270,6 +358,13 @@ export function createApp(deps: AppDeps): Hono {
       if (typeof body.text !== "string") return c.json({ error: "text is required" }, 400);
       if (body.intent !== undefined && !isIntent(body.intent)) return c.json({ error: "Unknown intent" }, 400);
       return c.json(await service.send(c.req.param("id"), body.text, body.intent as TurnIntent | undefined));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+  api.post("/sessions/:id/undo", async (c) => {
+    try {
+      return c.json(await service.undoLastTurn(c.req.param("id")));
     } catch (err) {
       return fail(c, err);
     }

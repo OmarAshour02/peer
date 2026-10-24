@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { serve, type ServerType } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { EventHub } from "./hub.js";
-import { mergePath, resolveLoginShellPath } from "./platform.js";
+import { mergePath, providerVariables, resolveLoginShellEnv } from "./platform.js";
 import type { RuntimeHooks } from "./runtime/adapter.js";
 import { ClaudeCodeAdapter } from "./runtime/claude/adapter.js";
 import { CodexAdapter } from "./runtime/codex/adapter.js";
@@ -87,8 +87,10 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
   const { port } = server.address() as AddressInfo;
   const url = `http://${HOST}:${port}`;
 
-  const shellPath = await resolveLoginShellPath();
-  const env = { ...process.env, PATH: mergePath(shellPath, process.env.PATH) };
+  const shell = await resolveLoginShellEnv();
+  const env = { ...process.env, PATH: mergePath(shell.path, process.env.PATH) };
+  const shellKeys = providerVariables(shell.vars, process.env);
+  if (Object.keys(shellKeys).length > 0) log(`[peer] model provider variables from the login shell (OpenCode only): ${Object.keys(shellKeys).sort().join(", ")}`);
   // In-process runtimes reach the collaboration engine directly; the service exists by the time
   // any agent runs, so these are bound late.
   const hooks: RuntimeHooks = {
@@ -100,7 +102,7 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
       binary: resolveOpenCodeBinary({ resourcesPath: opts.resourcesPath, appRoot: opts.appRoot }),
       rootDir: join(opts.dataDir, "opencode"),
       pluginFile: join(opts.appRoot, "dist", "plugin", "peer.js"),
-      env,
+      env: { ...shellKeys, ...env },
       bridgeUrl: url,
       bridgeToken,
       log: (line) => log(`[opencode] ${line}`),
@@ -108,7 +110,7 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
     new ClaudeCodeAdapter({ env, storage: store, hooks, dataDir: opts.dataDir, binary: process.env.PEER_CLAUDE_BIN, log }),
     new CodexAdapter({ env, storage: store, hooks, dataDir: opts.dataDir, binary: process.env.PEER_CODEX_BIN, version: peerVersion(opts.appRoot), log }),
   ]);
-  service = new PeerService(store, runtimes, hub);
+  service = new PeerService(store, runtimes, hub, { snapshotDir: join(opts.dataDir, "snapshots", "turns") });
   app = createApp({
     service,
     hub,

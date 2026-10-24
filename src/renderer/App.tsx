@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { NOTHING_TO_UNDO } from "../shared/types";
 import { PeerApi, resolveConfig } from "./api";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { Composer } from "./components/Composer";
+import { ProvidersDialog } from "./components/ProvidersDialog";
 import { Sidebar } from "./components/Sidebar";
 import { Transcript } from "./components/Transcript";
 import { MODE_UI } from "./modes";
@@ -9,9 +11,10 @@ import { RUNTIME_UI } from "./runtimes";
 import { activeRuntime, runtimeInfo, usePeer } from "./store";
 
 export function App() {
-  const { ready, error, activeWorkspaceId, activeSessionId, snapshot, modelsError, workspaces, api } = usePeer();
+  const { ready, error, notice, activeWorkspaceId, activeSessionId, snapshot, modelsError, workspaces, api } = usePeer();
   const kind = usePeer(activeRuntime);
   const runtimes = usePeer((s) => s.runtimes);
+  const providersOpen = usePeer((s) => s.providersOpen);
   const runtime = runtimeInfo({ runtimes }, kind).status;
   const [fatal, setFatal] = useState<string | null>(null);
   const [showChanges, setShowChanges] = useState(true);
@@ -25,17 +28,14 @@ export function App() {
         return;
       }
       const api = new PeerApi(config);
-      const { handleEvent, resync } = usePeer.getState();
+      const { handleEvent } = usePeer.getState();
       let wasDisconnected = false;
       unsubscribe = api.events(
         handleEvent,
         () => {
           usePeer.setState({ connected: true });
           // After a reconnect, state on the server may have moved on: reload what's on screen.
-          if (wasDisconnected) {
-            void api.health().then((h) => usePeer.setState({ runtimes: h.runtimes }));
-            void resync();
-          }
+          if (wasDisconnected) void usePeer.getState().reconnected();
           wasDisconnected = false;
         },
         () => {
@@ -61,6 +61,7 @@ export function App() {
 
   return (
     <div className="flex h-full" data-peer-ready="true">
+      {providersOpen && <ProvidersDialog />}
       <Sidebar />
       <main className="flex min-w-0 flex-1 flex-col">
         {runtime.state !== "ready" && (
@@ -78,14 +79,30 @@ export function App() {
           </div>
         )}
         {runtime.state === "ready" && modelsError && activeWorkspaceId && (
-          <div className="border-b border-line bg-warn/10 px-4 py-2 text-[12px] text-warn">
-            {modelsError} {RUNTIME_UI[kind].setup}
+          <div className="flex items-center gap-3 border-b border-line bg-warn/10 px-4 py-2 text-[12px] text-warn">
+            <span className="min-w-0 flex-1">
+              {modelsError} {RUNTIME_UI[kind].setup}
+            </span>
+            {kind === "opencode" && (
+              <button onClick={() => usePeer.getState().setProvidersOpen(true)} className="rounded border border-warn/60 px-2 py-0.5">
+                Connect a provider
+              </button>
+            )}
           </div>
         )}
         {error && (
           <div className="flex items-center gap-3 border-b border-line bg-danger/10 px-4 py-2 text-[12px] text-danger">
             <span className="min-w-0 flex-1">{error}</span>
             <button onClick={() => usePeer.getState().setError(null)} className="text-muted hover:text-fg">
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {notice && (
+          <div className="flex items-center gap-3 border-b border-line bg-raised px-4 py-2 text-[12px] text-muted">
+            <span className="min-w-0 flex-1">{notice}</span>
+            <button onClick={() => usePeer.getState().setNotice(null)} className="text-faint hover:text-fg">
               Dismiss
             </button>
           </div>
@@ -100,6 +117,8 @@ export function App() {
               </div>
               <span className="text-[12px] text-faint">{RUNTIME_UI[snapshot.session.runtime].label}</span>
               <span className={`text-[12px] ${MODE_UI[snapshot.session.mode].color}`}>{MODE_UI[snapshot.session.mode].label}</span>
+              {snapshot.session.runtime === "codex" && workspace && <SandboxNetworkToggle workspaceId={workspace.id} on={workspace.sandboxNetwork} />}
+              <UndoButton />
               <button onClick={() => setShowChanges(!showChanges)} className="text-[12px] text-faint hover:text-fg">
                 {showChanges ? "Hide changes" : "Show changes"}
               </button>
@@ -117,6 +136,66 @@ export function App() {
         )}
       </main>
     </div>
+  );
+}
+
+/** Codex runs commands in an OS sandbox without network unless the workspace allows it. */
+function SandboxNetworkToggle({ workspaceId, on }: { workspaceId: string; on: boolean }) {
+  const api = usePeer((s) => s.api);
+  async function toggle() {
+    if (!api) return;
+    try {
+      const ws = await api.updateWorkspace(workspaceId, { sandboxNetwork: !on });
+      usePeer.setState((s) => ({ workspaces: s.workspaces.map((w) => (w.id === ws.id ? ws : w)) }));
+    } catch (err) {
+      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return (
+    <button
+      onClick={() => void toggle()}
+      role="switch"
+      aria-checked={on}
+      title={
+        on
+          ? "Codex commands in this project may use the network (including local ports). Applies from the next turn."
+          : "Codex runs commands without network, so tests that start a server fail. Turn on to allow network in this project, from the next turn."
+      }
+      className={`text-[12px] ${on ? "text-warn" : "text-faint hover:text-fg"}`}
+    >
+      Network: {on ? "on" : "off"}
+    </button>
+  );
+}
+
+/** Undo the last turn: its file changes are reverted and it leaves the conversation. */
+function UndoButton() {
+  const api = usePeer((s) => s.api);
+  const snapshot = usePeer((s) => s.snapshot);
+  const [busy, setBusy] = useState(false);
+  if (!snapshot || (!snapshot.undo.available && snapshot.undo.reason === NOTHING_TO_UNDO)) return null;
+  const { session, undo } = snapshot;
+
+  async function run() {
+    if (!api || !window.confirm("Undo the last turn? Every file it changed goes back to how it was before the turn, and the turn leaves the conversation.")) return;
+    setBusy(true);
+    try {
+      await api.undoTurn(session.id);
+    } catch (err) {
+      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <button
+      onClick={() => void run()}
+      disabled={!undo.available || busy}
+      title={undo.available ? "Revert the files the last turn changed and remove it from the conversation" : (undo.reason ?? undefined)}
+      className="text-[12px] text-faint hover:text-fg disabled:opacity-40 disabled:hover:text-faint"
+    >
+      {busy ? "Undoing…" : "Undo last turn"}
+    </button>
   );
 }
 

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import type { RuntimeKind } from "../../shared/types";
+import { useRef, useState } from "react";
+import type { PeerSession, RuntimeKind } from "../../shared/types";
 import { MODE_UI } from "../modes";
 import { RUNTIME_UI, statusDot } from "../runtimes";
 import { usePeer } from "../store";
@@ -53,18 +53,22 @@ export function Sidebar() {
             offline
           </div>
         ) : (
-          <div className="flex items-center gap-2 text-[11px] text-faint">
+          <button
+            onClick={() => usePeer.getState().setProvidersOpen(true)}
+            title="Models & providers"
+            className="flex items-center gap-2 rounded px-1 text-[11px] text-faint hover:bg-raised hover:text-muted"
+          >
             {runtimes.map((r) => (
               <span
                 key={r.kind}
                 className="flex items-center gap-1"
-                title={`${r.name}: ${r.status.state === "ready" ? `ready (${r.status.version ?? "unknown version"})` : (r.status.error ?? r.status.state)}`}
+                title={`${r.name}: ${r.status.state === "ready" ? `ready (${[r.status.version ?? "unknown version", r.status.account].filter(Boolean).join(", ")})` : (r.status.error ?? r.status.state)}${r.status.warning ? `\n${r.status.warning}` : ""}`}
               >
                 <span className={`h-1.5 w-1.5 rounded-full ${statusDot(r.status)}`} />
                 {RUNTIME_UI[r.kind].short}
               </span>
             ))}
-          </div>
+          </button>
         )}
       </div>
 
@@ -131,17 +135,7 @@ export function Sidebar() {
                     </select>
                   </div>
                   {sessions.map((s) => (
-                    <button
-                      key={s.id}
-                      onClick={() => void selectSession(s.id)}
-                      className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px] ${
-                        s.id === activeSessionId ? "bg-raised text-fg" : "text-muted hover:bg-raised/60"
-                      }`}
-                    >
-                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${MODE_UI[s.mode].dot}`} title={MODE_UI[s.mode].label} />
-                      <span className="min-w-0 flex-1 truncate">{s.title}</span>
-                      {s.runtime !== "opencode" && <span className="shrink-0 text-[10px] text-faint">{RUNTIME_UI[s.runtime].short}</span>}
-                    </button>
+                    <SessionRow key={s.id} session={s} active={s.id === activeSessionId} />
                   ))}
                 </div>
               )}
@@ -150,5 +144,91 @@ export function Sidebar() {
         })}
       </div>
     </aside>
+  );
+}
+
+/** A session in the sidebar: click to open, double-click (or the pencil) to rename, × to delete. */
+function SessionRow({ session: s, active }: { session: PeerSession; active: boolean }) {
+  const api = usePeer((st) => st.api);
+  const selectSession = usePeer((st) => st.selectSession);
+  const setError = usePeer((st) => st.setError);
+  const [name, setName] = useState<string | null>(null);
+  // Enter submits and the input's blur follows; only the first one renames.
+  const editing = useRef(false);
+  const startRename = () => {
+    editing.current = true;
+    setName(s.title);
+  };
+
+  async function rename() {
+    if (!editing.current) return;
+    editing.current = false;
+    const title = name?.trim();
+    setName(null);
+    if (!api || !title || title === s.title) return;
+    try {
+      await api.updateSession(s.id, { title });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function remove() {
+    if (!api) return;
+    if (!window.confirm(`Delete "${s.title}"? Its conversation and checkpoints are removed from Peer. Files in the project are not changed.`)) return;
+    try {
+      await api.deleteSession(s.id);
+      const { sessions, activeSessionId } = usePeer.getState();
+      usePeer.setState({ sessions: sessions.filter((x) => x.id !== s.id) });
+      if (activeSessionId === s.id) await selectSession(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  if (name !== null) {
+    return (
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void rename();
+        }}
+      >
+        <input
+          autoFocus
+          value={name}
+          aria-label="Session name"
+          onChange={(e) => setName(e.target.value)}
+          onBlur={() => void rename()}
+          onKeyDown={(e) => {
+            if (e.key !== "Escape") return;
+            editing.current = false;
+            setName(null);
+          }}
+          maxLength={200}
+          className="w-full rounded border border-accent bg-bg px-2 py-1 text-[12px] outline-none"
+        />
+      </form>
+    );
+  }
+
+  return (
+    <div
+      className={`group flex w-full items-center gap-2 rounded px-2 py-1 text-[12px] ${active ? "bg-raised text-fg" : "text-muted hover:bg-raised/60"}`}
+    >
+      <button onClick={() => void selectSession(s.id)} onDoubleClick={startRename} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${MODE_UI[s.mode].dot}`} title={MODE_UI[s.mode].label} />
+        <span className="min-w-0 flex-1 truncate">{s.title}</span>
+        {s.runtime !== "opencode" && <span className="shrink-0 text-[10px] text-faint group-hover:hidden">{RUNTIME_UI[s.runtime].short}</span>}
+      </button>
+      <span className="hidden shrink-0 items-center gap-1 group-hover:flex group-focus-within:flex">
+        <button onClick={startRename} title="Rename" aria-label={`Rename ${s.title}`} className="px-0.5 text-faint hover:text-fg">
+          ✎
+        </button>
+        <button onClick={() => void remove()} title="Delete" aria-label={`Delete ${s.title}`} className="px-0.5 text-faint hover:text-danger">
+          ×
+        </button>
+      </span>
+    </div>
   );
 }

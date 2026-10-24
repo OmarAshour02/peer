@@ -4,6 +4,9 @@ import { INTENT_UI, MODE_UI } from "../modes";
 import { RUNTIME_UI } from "../runtimes";
 import { runtimeInfo, usePeer } from "../store";
 
+/** Model picker entry that opens "Models & providers" instead of choosing a model. */
+const CONNECT = "__connect__";
+
 export function Composer() {
   const { api, snapshot, models, modelsError } = usePeer();
   const runtimes = usePeer((s) => s.runtimes);
@@ -43,6 +46,7 @@ export function Composer() {
 
   async function setModel(value: string) {
     if (!api) return;
+    if (value === CONNECT) return usePeer.getState().setProvidersOpen(true);
     const [providerId, ...rest] = value.split("/");
     const model = value && providerId ? { providerId, modelId: rest.join("/") } : null;
     try {
@@ -137,6 +141,7 @@ export function Composer() {
                   ))}
                 </optgroup>
               ))}
+              {session.runtime === "opencode" && <option value={CONNECT}>Connect a provider…</option>}
             </select>
             {busy && !waitingOnCheckpoint ? (
               <button
