@@ -7,6 +7,7 @@ const COMMANDS: Record<string, TurnIntent> = {
   "/discuss": "discuss",
   "/hint": "hint",
   "/answer": "answer",
+  "/proceed": "proceed",
 };
 
 /**
@@ -19,4 +20,17 @@ export function parseIntent(text: string, explicit?: TurnIntent): { intent: Turn
   const stripped = command && match ? text.slice(match[0].length).trim() : text.trim();
   if (explicit && explicit !== "default") return { intent: explicit, text: stripped };
   return { intent: command ?? "default", text: stripped };
+}
+
+/** An optional acknowledgement, then a bare go-ahead, then an optional "please"/"now", and nothing else. */
+const GO_AHEAD =
+  /^(?:(?:ok|okay|alright|yes|yep|yeah|sure|great|perfect|agreed|sounds good|looks good|lgtm)[\s,.!]+)?(?:(?:please|then|so)\s+)?(?:go ahead|proceed|do it|go for it|ship it|implement it|build it|make the changes?|let'?s do it|let'?s go|let'?s proceed|start implementing|you can proceed|you can go ahead)(?:[\s,]+(?:please|now|then))*[\s.!]*$/i;
+
+/**
+ * Whether a message only tells the agent to go ahead ("Go ahead.", "OK, proceed", "lgtm, ship it").
+ * During "Discuss first" such a message ends the discussion; any other message, including a
+ * go-ahead with more to it ("go ahead and compare both"), keeps discussing.
+ */
+export function isGoAhead(text: string): boolean {
+  return GO_AHEAD.test(text.trim());
 }

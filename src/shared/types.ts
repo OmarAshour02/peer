@@ -4,12 +4,19 @@
 export const COLLABORATION_MODES = ["focus", "collaborate", "learn"] as const;
 export type CollaborationModeId = (typeof COLLABORATION_MODES)[number];
 export const DEFAULT_MODE: CollaborationModeId = "collaborate";
+/**
+ * The modes Peer offers. Focus is retired (v0.2): sessions created with it keep working, and the
+ * API still accepts it, but new sessions never default to it and the UI does not offer it.
+ */
+export const PRIMARY_MODES = ["collaborate", "learn"] as const satisfies readonly CollaborationModeId[];
+export const isPrimaryMode = (mode: CollaborationModeId): boolean => (PRIMARY_MODES as readonly CollaborationModeId[]).includes(mode);
 
 /**
  * What the developer explicitly asked for on this turn, on top of the session mode.
- * Set from composer controls or a leading slash command (/go, /discuss, /hint, /answer).
+ * Set from composer controls or a leading slash command (/go, /discuss, /hint, /answer, /proceed).
+ * "proceed": go ahead with what was discussed (it ends a "Discuss first" discussion).
  */
-export const TURN_INTENTS = ["default", "delegate", "discuss", "hint", "answer"] as const;
+export const TURN_INTENTS = ["default", "delegate", "discuss", "hint", "answer", "proceed"] as const;
 export type TurnIntent = (typeof TURN_INTENTS)[number];
 
 /** Kinds of decision the agent may bring to the developer through a checkpoint. */
@@ -21,6 +28,7 @@ export const CHECKPOINT_CATEGORIES = [
   "hypothesis", // ask the developer to predict / diagnose before being told
   "concept", // check understanding of a concept the task depends on
   "confirm", // go-ahead on a concrete plan
+  "routine", // not a question: the agent says the work is routine (recorded, never asked; unlocks Learn's lock)
 ] as const;
 export type CheckpointCategory = (typeof CHECKPOINT_CATEGORIES)[number];
 
@@ -40,8 +48,16 @@ export interface GateState {
 
 export type CheckpointStatus = "pending" | "resolved" | "auto_resolved" | "interrupted" | "cancelled";
 
-/** Developer responses to a checkpoint. */
-export const CHECKPOINT_ACTIONS = ["answer", "choose", "delegate", "skip", "hint"] as const;
+/**
+ * Developer responses to a checkpoint.
+ * - delegate ("You decide"): the agent makes this one decision.
+ * - skip ("Proceed"): stop discussing and implement the recommended or agreed approach.
+ * - go ("Just do it"): proceed, and the rest of the task runs without optional questions.
+ * - hint ("Give me a hint"): one hint, then the agent asks again.
+ * - direct ("Direct answer"): the agent answers its own question, and asks no more Socratic ones this task.
+ * - discuss ("Discuss first"): talk it through; code changes stay locked until the developer proceeds.
+ */
+export const CHECKPOINT_ACTIONS = ["answer", "choose", "delegate", "skip", "go", "hint", "direct", "discuss"] as const;
 export type CheckpointAction = (typeof CHECKPOINT_ACTIONS)[number];
 
 export interface CheckpointOption {
@@ -56,6 +72,8 @@ export interface CheckpointResolution {
   option?: string;
   /** Human-readable explanation, e.g. why the policy declined to ask. */
   note?: string;
+  /** Declined as a repeat: the earlier checkpoint where the developer already answered it. */
+  repeatOf?: string;
 }
 
 /** Kinds of engineering decision Peer detects itself from tool calls, before they run. */
@@ -147,6 +165,11 @@ export interface PeerSession {
    * destructive-command approvals still apply. Off by default.
    */
   autoApprovals: boolean;
+  /**
+   * "Discuss first" is in effect: follow-up messages keep discussing, with code changes locked,
+   * until the developer proceeds (Proceed, Just do it, a go-ahead message) or ends the discussion.
+   */
+  discussing: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -155,8 +178,15 @@ export interface Turn {
   id: string;
   sessionId: string;
   mode: CollaborationModeId;
+  /** What the developer asked for; a control used on a question mid-turn changes it for the rest of the turn. */
   intent: TurnIntent;
+  /** The gate the turn started with (it fixes a per-turn sandbox, see sandboxFixedPerTurn). */
   gate: GateKind;
+  /**
+   * The developer asked to discuss in the middle of the turn ("Discuss first" on a question): code
+   * changes are locked again, like a "hold" gate, until they proceed. Cleared by engagedAt.
+   */
+  relockedAt: number | null;
   /** For a continuation: the turn whose work it carries on (same task, same checkpoint budget). */
   continuedFrom: string | null;
   engagedAt: number | null;

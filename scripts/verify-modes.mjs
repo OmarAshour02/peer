@@ -9,7 +9,7 @@
 // Usage:
 //   npm run server &                          # or a running Peer desktop app
 //   node scripts/verify-modes.mjs [--api http://127.0.0.1:4317] [--token <t>] [--model provider/model]
-//                                 [--modes focus,collaborate,learn] [--task "..."] [--runtime opencode|claude|codex] [--out report.json]
+//                                 [--modes collaborate,learn] [--task "..."] [--runtime opencode|claude|codex] [--out report.json]
 //   --model is required (or --allow-default-model): it is checked against the runtime and read back
 //   from each created session before any prompt is sent.
 import { cpSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -44,7 +44,8 @@ function defaultDataDir() {
 
 const API = args.api ?? `http://127.0.0.1:${process.env.PEER_PORT ?? 4317}`;
 const TOKEN = args.token ?? readFileSync(join(defaultDataDir(), "api-token"), "utf8").trim();
-const MODES = (args.modes ?? "focus,collaborate,learn").split(",");
+// Focus is retired; pass --modes focus,… to include it.
+const MODES = (args.modes ?? "collaborate,learn").split(",");
 const TASK =
   args.task ??
   "Add rate limiting to this API so a single client cannot make more than 5 requests per minute to /api/notes. Include a test.";

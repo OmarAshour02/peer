@@ -114,6 +114,21 @@ export function claudeAccount(info: ClaudeAuthStatus, loggedIn: boolean): string
   return "Anthropic API key";
 }
 
+/** Fixed for the whole Claude Code session: a resumed session keeps the system prompt of its first query. */
+export const CLAUDE_POLICY_NOTE =
+  "You are running inside Peer. Peer's collaboration policy for each turn comes at the start of the developer's message, in a <peer_collaboration_policy> block. The most recent block is the one in force: it replaces every earlier one (mode, intent, whether you may change code). Follow it, and don't mention the block to the developer.";
+
+/**
+ * The prompt and system-prompt addition for one Claude Code turn. Claude Code keeps the system
+ * prompt of a session's first query when the session is resumed (verified with CLI 2.1.310: a
+ * resumed query's new `append` is ignored), so the per-turn policy travels with the message, as
+ * it does for Codex. Peer's own transcript keeps the developer's text without it.
+ */
+export function claudeTurnPrompt(input: Pick<PromptInput, "text" | "system">): { prompt: string; append: string } {
+  if (!input.system) return { prompt: input.text, append: CLAUDE_POLICY_NOTE };
+  return { prompt: `<peer_collaboration_policy>\n${input.system}\n</peer_collaboration_policy>\n\n${input.text}`, append: CLAUDE_POLICY_NOTE };
+}
+
 export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   readonly kind = "claude" as const;
   readonly name = "Claude Code";
@@ -347,8 +362,9 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
 
     const model = input.model?.modelId && input.model.modelId !== "default" ? input.model.modelId : undefined;
     try {
+      const turn = claudeTurnPrompt(input);
       run.query = query({
-        prompt: input.text,
+        prompt: turn.prompt,
         options: {
           pathToClaudeCodeExecutable: binary,
           cwd: directory,
@@ -356,7 +372,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
           abortController: run.abort,
           ...(state.started ? { resume: sessionId } : { sessionId }),
           model,
-          systemPrompt: { type: "preset", preset: "claude_code", append: input.system },
+          systemPrompt: { type: "preset", preset: "claude_code", append: turn.append },
           // The developer's own Claude Code settings, CLAUDE.md files, MCP servers and permission rules apply.
           settingSources: ["user", "project", "local"],
           // File edits inside the workspace don't prompt (as in Peer's other runtimes); Peer's gate
@@ -577,13 +593,23 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
         }
         return undefined;
       }
-      case "result":
+      case "result": {
+        // The turn's tokens, as OpenCode reports them: a step-finish part on the turn's last message.
+        // `usage` covers this query's main agent loop (Peer runs one query per turn); `modelUsage`
+        // would not do, since a resumed session's totals carry the earlier turns.
+        const messageId = this.currentMessage.get(sessionId);
+        const u = message.usage;
+        if (messageId && u) {
+          const input = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+          transcript.upsertPart(messageId, { type: "step-finish", id: `${messageId}:usage`, tokens: { input, output: u.output_tokens ?? 0 } });
+        }
         if (message.subtype === "success" && !message.is_error) return undefined;
         return "result" in message && typeof message.result === "string" && message.result
           ? message.result
           : "errors" in message && Array.isArray(message.errors) && message.errors.length
             ? message.errors.join("\n")
             : `Claude Code stopped (${message.subtype}).`;
+      }
       default:
         return undefined;
     }

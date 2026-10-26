@@ -54,7 +54,6 @@ const OPTED_OUT_NOTIFICATIONS = [
   "turn/moderationMetadata",
   "rawResponseItem/completed",
   "rawResponse/completed",
-  "thread/tokenUsage/updated",
   "account/rateLimits/updated",
   "mcpServer/startupStatus/updated",
   "thread/readState/changed",
@@ -108,6 +107,12 @@ interface PendingApproval {
   params: Record<string, unknown>;
 }
 
+/** Token counts in Codex's thread/tokenUsage/updated (running totals, or the last request). */
+interface TokenCounts {
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
 interface Run {
   sessionId: string;
   threadId: string;
@@ -131,6 +136,8 @@ interface Run {
   preTestTrees: Map<string, string | null>;
   /** The workspace the last test run that reached its tests ran against; undefined before one. */
   testedTree?: string | null;
+  /** The thread's token totals before this turn (Codex reports running totals for the thread). */
+  usageBase?: { input: number; output: number };
 }
 
 /**
@@ -579,6 +586,16 @@ export class CodexAdapter implements AgentRuntimeAdapter {
       case "item/reasoning/summaryTextDelta":
         transcript.appendText(run.messageId, String(params.itemId), "reasoning", String(params.delta ?? ""));
         return;
+      case "thread/tokenUsage/updated": {
+        // The turn's tokens, as OpenCode reports them: totals now minus totals before the turn.
+        const usage = params.tokenUsage as { total?: TokenCounts; last?: TokenCounts } | undefined;
+        const total = usage?.total;
+        if (!total || typeof total.inputTokens !== "number" || typeof total.outputTokens !== "number") return;
+        run.usageBase ??= { input: total.inputTokens - (usage.last?.inputTokens ?? 0), output: total.outputTokens - (usage.last?.outputTokens ?? 0) };
+        const tokens = { input: Math.max(0, total.inputTokens - run.usageBase.input), output: Math.max(0, total.outputTokens - run.usageBase.output) };
+        transcript.upsertPart(run.messageId, { type: "step-finish", id: `${run.messageId}:usage`, tokens });
+        return;
+      }
       case "error": {
         const error = params.error as { message?: string } | undefined;
         if (params.willRetry) this.emit({ type: "session.status", sessionId: run.sessionId, status: "retry", message: error?.message });

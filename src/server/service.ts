@@ -10,7 +10,7 @@ import type {
   UndoResult,
   Workspace,
 } from "../shared/types.js";
-import { pickDefaultRuntime } from "../shared/types.js";
+import { DEFAULT_MODE, isPrimaryMode, pickDefaultRuntime } from "../shared/types.js";
 import { CollaborationEngine, EngineError, type EngineOptions } from "./collaboration/engine.js";
 import type { EventHub } from "./hub.js";
 import type { AgentRuntimeAdapter, RuntimeEvent } from "./runtime/adapter.js";
@@ -83,7 +83,8 @@ export class PeerService {
     const prefs = this.preferences();
     const runtime = this.requireRuntime(input.runtime ?? prefs.defaultRuntime);
     const runtimeSession = await runtime.createSession(ws.path, {});
-    const mode = input.mode ?? prefs.defaultMode;
+    // Focus is retired: asked for explicitly it still works, but it is never the default.
+    const mode = input.mode ?? (isPrimaryMode(prefs.defaultMode) ? prefs.defaultMode : DEFAULT_MODE);
     // Asking for another runtime than the default is a choice; using the default is not.
     if (input.runtime && input.runtime !== prefs.defaultRuntime) this.store.setPreferences({ defaultRuntime: input.runtime });
     const session = this.store.createSession({
@@ -100,9 +101,14 @@ export class PeerService {
     return session;
   }
 
-  updateSession(sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string; autoApprovals?: boolean }): PeerSession {
+  updateSession(
+    sessionId: string,
+    patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string; autoApprovals?: boolean; discussing?: boolean },
+  ): PeerSession {
     let session = this.requireSession(sessionId);
     if (patch.mode) session = this.engine.setMode(sessionId, patch.mode);
+    // Ending (or starting) "Discuss first" for the next messages; it never unlocks a running turn.
+    if (patch.discussing !== undefined) session = this.engine.setDiscussing(sessionId, patch.discussing, "developer");
     if (patch.title !== undefined) {
       const title = patch.title.replace(/\s+/g, " ").trim();
       if (!title) throw new EngineError("A session name cannot be empty.");

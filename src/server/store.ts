@@ -131,6 +131,12 @@ const MIGRATIONS: string[] = [
   -- The runtime settles its own permission prompts where it can (Claude Code's auto mode).
   ALTER TABLE sessions ADD COLUMN auto_approvals INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- "Discuss first" is in effect for the session's follow-up messages until the developer proceeds.
+  ALTER TABLE sessions ADD COLUMN discussing INTEGER NOT NULL DEFAULT 0;
+  -- The developer asked to discuss mid-turn: code changes are locked again until they proceed.
+  ALTER TABLE turns ADD COLUMN relocked_at INTEGER;
+  `,
 ];
 
 type Row = Record<string, unknown>;
@@ -235,7 +241,7 @@ export class Store {
   }): PeerSession {
     const now = Date.now();
     // Auto approvals start off; the developer turns them on per session.
-    const session: PeerSession = { id: newId("ps"), ...input, autoApprovals: false, createdAt: now, updatedAt: now };
+    const session: PeerSession = { id: newId("ps"), ...input, autoApprovals: false, discussing: false, createdAt: now, updatedAt: now };
     this.db
       .prepare(
         `INSERT INTO sessions (id, workspace_id, runtime, runtime_session_id, title, mode, model_provider, model_id, created_at, updated_at)
@@ -256,7 +262,7 @@ export class Store {
     return session;
   }
 
-  updateSession(id: string, patch: { title?: string; mode?: CollaborationModeId; model?: ModelRef | null; autoApprovals?: boolean }): PeerSession {
+  updateSession(id: string, patch: { title?: string; mode?: CollaborationModeId; model?: ModelRef | null; autoApprovals?: boolean; discussing?: boolean }): PeerSession {
     const current = this.getSession(id);
     if (!current) throw new Error(`Unknown session ${id}`);
     const next: PeerSession = {
@@ -265,11 +271,12 @@ export class Store {
       mode: patch.mode ?? current.mode,
       model: patch.model === undefined ? current.model : patch.model,
       autoApprovals: patch.autoApprovals ?? current.autoApprovals,
+      discussing: patch.discussing ?? current.discussing,
       updatedAt: Date.now(),
     };
     this.db
-      .prepare("UPDATE sessions SET title = ?, mode = ?, model_provider = ?, model_id = ?, auto_approvals = ?, updated_at = ? WHERE id = ?")
-      .run(next.title, next.mode, next.model?.providerId ?? null, next.model?.modelId ?? null, next.autoApprovals ? 1 : 0, next.updatedAt, id);
+      .prepare("UPDATE sessions SET title = ?, mode = ?, model_provider = ?, model_id = ?, auto_approvals = ?, discussing = ?, updated_at = ? WHERE id = ?")
+      .run(next.title, next.mode, next.model?.providerId ?? null, next.model?.modelId ?? null, next.autoApprovals ? 1 : 0, next.discussing ? 1 : 0, next.updatedAt, id);
     return next;
   }
 
@@ -336,6 +343,7 @@ export class Store {
     const turn: Turn = {
       id: newId("turn"),
       ...input,
+      relockedAt: null,
       continuedFrom: input.continuedFrom ?? null,
       engagedAt: null,
       startedAt: Date.now(),
@@ -364,6 +372,21 @@ export class Store {
     this.db.prepare("UPDATE turns SET engaged_at = COALESCE(engaged_at, ?) WHERE id = ?").run(Date.now(), id);
   }
 
+  /** The developer said the agent's routine work is not routine: Learn's lock closes again. */
+  clearEngagement(id: string) {
+    this.db.prepare("UPDATE turns SET engaged_at = NULL WHERE id = ?").run(id);
+  }
+
+  /** Lock code changes again for the rest of the turn (a discussion or hint request). */
+  relockTurn(id: string) {
+    this.db.prepare("UPDATE turns SET relocked_at = ?, engaged_at = NULL WHERE id = ?").run(Date.now(), id);
+  }
+
+  /** A control used on a question changes what the developer asked for, for the rest of the turn. */
+  setTurnIntent(id: string, intent: TurnIntent) {
+    this.db.prepare("UPDATE turns SET intent = ? WHERE id = ?").run(intent, id);
+  }
+
   setTurnTree(id: string, which: "start" | "end", tree: string | null) {
     this.db.prepare(`UPDATE turns SET ${which === "start" ? "start_tree" : "end_tree"} = ? WHERE id = ?`).run(tree, id);
   }
@@ -372,6 +395,11 @@ export class Store {
   turnTrees(id: string): { start: string | null; end: string | null } {
     const row = this.db.prepare("SELECT start_tree, end_tree FROM turns WHERE id = ?").get(id);
     return { start: row?.start_tree == null ? null : String(row.start_tree), end: row?.end_tree == null ? null : String(row.end_tree) };
+  }
+
+  /** The session's turns, newest first. */
+  listTurns(sessionId: string): Turn[] {
+    return this.db.prepare("SELECT * FROM turns WHERE session_id = ? ORDER BY started_at DESC, rowid DESC").all(sessionId).map(toTurn);
   }
 
   /** The most recent turn that has not been undone. */
@@ -540,6 +568,7 @@ function toSession(r: Row): PeerSession {
     mode: r.mode as CollaborationModeId,
     model: r.model_provider && r.model_id ? { providerId: String(r.model_provider), modelId: String(r.model_id) } : null,
     autoApprovals: Number(r.auto_approvals ?? 0) === 1,
+    discussing: Number(r.discussing ?? 0) === 1,
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
   };
@@ -552,6 +581,7 @@ function toTurn(r: Row): Turn {
     mode: r.mode as CollaborationModeId,
     intent: r.intent as TurnIntent,
     gate: r.gate as GateKind,
+    relockedAt: r.relocked_at == null ? null : Number(r.relocked_at),
     continuedFrom: r.continued_from == null ? null : String(r.continued_from),
     engagedAt: r.engaged_at == null ? null : Number(r.engaged_at),
     startedAt: Number(r.started_at),

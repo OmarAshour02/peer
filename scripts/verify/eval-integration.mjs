@@ -21,21 +21,29 @@ import { fileURLToPath } from "node:url";
 import { formatModelRef, parseArgs, parseModelRef, UsageError } from "../lib/args.mjs";
 import { resolveRuntimeModel } from "../lib/model-guard.mjs";
 import { run } from "../lib/proc.mjs";
+import { SCENARIOS } from "../eval-scenarios.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const RUNTIMES = ["opencode", "claude", "codex"];
 const SUITES = {
   collab: { script: "scripts/validate-collaboration.mjs", selectFlag: "scenarios", units: ["persist", "paginate", "slash", "etag"] },
-  modes: { script: "scripts/verify-modes.mjs", selectFlag: "modes", units: ["focus", "collaborate", "learn"] },
+  // Focus is retired; it can still be selected explicitly.
+  modes: { script: "scripts/verify-modes.mjs", selectFlag: "modes", units: ["collaborate", "learn", "focus"], defaults: ["collaborate", "learn"] },
+  v02: { script: "scripts/eval-scenarios.mjs", selectFlag: "cases", units: Object.keys(SCENARIOS) },
 };
 const EXIT = { PASS: 0, FAIL: 1, NEEDS_MANUAL_REVIEW: 2, USAGE: 3 };
 
 const SPEC = {
   target: { type: "list", help: "runtime:provider/model, repeatable (e.g. claude:claude/haiku)" },
-  suite: { type: "string", help: "collab | modes | all (default collab)" },
+  suite: { type: "string", help: "collab | modes | v02 | all (default collab)" },
   scenarios: { type: "string", help: "collab scenarios, comma-separated (default all four)" },
-  modes: { type: "string", help: "modes for the modes suite (default focus,collaborate,learn)" },
+  modes: { type: "string", help: "modes for the modes suite (default collaborate,learn)" },
+  cases: { type: "string", help: "v02 cases, comma-separated (default all)" },
   hold: { type: "string", help: "seconds to hold the first checkpoint unanswered (default 30)" },
+  "max-runs": { type: "string", help: "refuse a plan with more agent runs than this (default 30)" },
+  timeout: { type: "string", help: "v02: minutes per case (default 10)" },
+  "max-tool-calls": { type: "string", help: "v02: tool calls per case (default 80)" },
+  "max-tokens": { type: "string", help: "v02: tokens per case, as the runtime reports them (default 2000000)" },
   confirm: { type: "boolean", help: "actually run (spends real model quota)" },
   "keep-data": { type: "boolean", help: "keep the scratch Peer data dir" },
   help: { type: "boolean" },
@@ -134,6 +142,12 @@ export function assessResults(suite, results) {
   for (const r of results) {
     const label = `${r.runtime}/${r.scenario ?? r.mode}`;
     if (r.timedOut) deviations.push(`${label}: timed out`);
+    if (suite === "v02") {
+      // The harness assessed each case itself (scripts/eval-scenarios.mjs: assessScenario).
+      for (const v of r.violations ?? []) violations.push(`${label}: ${v}`);
+      for (const d of r.deviations ?? []) deviations.push(`${label}: ${d}`);
+      continue;
+    }
     if (suite === "collab") {
       if (r.pause && !r.pause.held) violations.push(`${label}: work continued while a checkpoint was open (${[...(r.pause.newTools ?? [])].slice(0, 3).join("; ") || "workspace changed"})`);
       if (r.expectCheckpoint !== r.checkpointsAsked > 0) deviations.push(`${label}: expected ${r.expectCheckpoint ? "a checkpoint" : "no checkpoint"}, got ${r.checkpointsAsked}`);
@@ -156,12 +170,24 @@ async function main() {
   if (process.env.PEER_VERIFY_ACTIVE) throw new UsageError("eval:integration cannot run inside a verification review (PEER_VERIFY_ACTIVE is set).");
   if (args.target.length === 0) throw new UsageError("Give at least one --target runtime:provider/model. There is no default model, on purpose.");
   const targets = args.target.map(parseTarget);
-  const suiteNames = args.suite === "all" ? ["collab", "modes"] : [args.suite ?? "collab"];
-  for (const s of suiteNames) if (!SUITES[s]) throw new UsageError(`Unknown --suite ${s}. Use collab, modes or all.`);
+  const suiteNames = args.suite === "all" ? ["collab", "modes", "v02"] : [args.suite ?? "collab"];
+  for (const s of suiteNames) if (!SUITES[s]) throw new UsageError(`Unknown --suite ${s}. Use collab, modes, v02 or all.`);
   const selection = {
     collab: (args.scenarios ?? SUITES.collab.units.join(",")).split(","),
-    modes: (args.modes ?? SUITES.modes.units.join(",")).split(","),
+    modes: (args.modes ?? SUITES.modes.defaults.join(",")).split(","),
+    v02: (args.cases ?? SUITES.v02.units.join(",")).split(","),
   };
+  const maxRuns = Number(args["max-runs"] ?? 30);
+  if (!Number.isInteger(maxRuns) || maxRuns < 1) throw new UsageError("--max-runs must be a positive integer");
+  // The run cap is checked before anything starts.
+  const planned = suiteNames.reduce((n, s) => n + selection[s].length * targets.length, 0);
+  if (planned > maxRuns) throw new UsageError(`The plan has ${planned} agent runs, more than --max-runs ${maxRuns}. Narrow it, or raise --max-runs deliberately.`);
+  const limitFlags = [];
+  for (const flag of ["timeout", "max-tool-calls", "max-tokens"]) {
+    if (args[flag] === undefined) continue;
+    if (!(Number(args[flag]) > 0)) throw new UsageError(`--${flag} must be a positive number`);
+    limitFlags.push(`--${flag}`, args[flag]);
+  }
   for (const s of suiteNames) for (const u of selection[s]) if (!SUITES[s].units.includes(u)) throw new UsageError(`Unknown ${SUITES[s].selectFlag} "${u}". Known: ${SUITES[s].units.join(", ")}`);
 
   const runId = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
@@ -182,12 +208,13 @@ async function main() {
     }
     const plan = suiteNames.flatMap((s) => resolved.map((r) => ({ suite: s, runtime: r.runtime, model: formatModelRef(r.model), units: selection[s] })));
     const runs = plan.reduce((n, p) => n + p.units.length, 0);
-    const manifest = { runId, createdAt: new Date().toISOString(), confirmed: args.confirm, targets: resolved, plan, agentRuns: runs };
+    const manifest = { runId, createdAt: new Date().toISOString(), confirmed: args.confirm, targets: resolved, plan, agentRuns: runs, limits: { maxRuns, v02PerCase: { timeoutMinutes: args.timeout ?? "10", maxToolCalls: args["max-tool-calls"] ?? "80", maxTokens: args["max-tokens"] ?? "2000000" } } };
     writeFileSync(join(runDir, "manifest.json"), JSON.stringify(manifest, null, 2));
 
     say("\nResolved (recorded in manifest.json before any prompt):");
     for (const r of resolved) say(`  ${r.runtime.padEnd(9)} ${r.runtimeName} ${r.runtimeVersion ?? ""}, model ${formatModelRef(r.model)}${r.modelName ? ` (${r.modelName})` : ""}`);
-    say(`\nPlan: ${runs} real agent run(s)`);
+    say(`\nPlan: ${runs} real agent run(s) (limit --max-runs ${maxRuns})`);
+    if (suiteNames.includes("v02")) say(`  v02 limits per case: ${manifest.limits.v02PerCase.timeoutMinutes} min, ${manifest.limits.v02PerCase.maxToolCalls} tool calls, ${manifest.limits.v02PerCase.maxTokens} tokens`);
     for (const p of plan) say(`  ${p.suite.padEnd(6)} ${p.runtime.padEnd(9)} ${p.model.padEnd(28)} ${p.units.join(", ")}`);
     if (!args.confirm) {
       say("\nNothing was run. Add --confirm to run it (this spends real model quota).");
@@ -200,6 +227,7 @@ async function main() {
       const script = SUITES[p.suite];
       const harnessArgs = [join(root, script.script), "--api", peer.base, "--token", peer.token, "--runtime", p.runtime, "--model", p.model, `--${script.selectFlag}`, p.units.join(","), "--out", out];
       if (p.suite === "collab" && args.hold) harnessArgs.push("--hold", args.hold);
+      if (p.suite === "v02") harnessArgs.push(...limitFlags);
       say(`\n=== ${p.suite} on ${p.runtime} (${p.model})`);
       const r = await run(process.execPath, harnessArgs, { cwd: root, logFile: join(runDir, `${p.suite}-${p.runtime}.log`), onStdoutLine: (l) => say(`  ${l}`) });
       if (r.exitCode !== 0 || !existsSync(out)) {

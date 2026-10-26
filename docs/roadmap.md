@@ -16,6 +16,13 @@
 - Per-workspace network switch for Codex's sandbox; warnings for Claude Code / Codex versions outside the tested range.
 - Rename and delete sessions; undo the last turn (files on every runtime, conversation on OpenCode).
 
+## Done: v0.2, the collaboration experience
+
+- Two modes: Collaborate (default) and Learn. Focus is retired (kept for existing sessions and the API).
+- Mode-specific controls in the composer and on questions, as temporary overrides applied by the engine on every runtime: Just do it, Discuss first (until you proceed), Give me a hint (progressive), Direct answer.
+- Adaptive involvement instead of quotas: a ceiling, per-session adaptation to hands-off responses, earlier decisions given to the agent, repeated questions declined, routine work in Learn without a question.
+- Claude Code and Codex report token usage like OpenCode; the integration evaluation has run, time, tool-call and token limits.
+
 ## Next: more runtimes and runtime polish
 
 1. **More agents** behind the same adapter interface: Gemini CLI, Cursor, or anything speaking the Agent Client Protocol (ACP), which T3 Code also uses for some providers.
@@ -30,13 +37,14 @@
    - Classify tasks with a cheap model call.
    - Track how often each kind of checkpoint is answered versus skipped.
 2. **Collaborate approach gate.** An optional "agree before significant edits" gate for Collaborate, triggered by a diff-size or file-count threshold instead of always being on.
-3. **Adaptive policy.** Adjust per-developer budgets and categories from history. For example, if a developer always presses *You decide* for trade-offs, stop asking about them.
-4. **Session UX.**
+3. **Adaptive policy across sessions.** v0.2 adapts within a session (hands-off responses narrow the questions). Carrying that across sessions needs per-developer memory, deliberately not built yet.
+4. **Routine-work review.** Learn's routine declaration is the agent's judgment. Track how often it is used on tasks the developer later engages with, and consider a "this isn't routine, ask me" control.
+5. **Session UX.**
    - Reopen runtime sub-sessions (subagents).
    - Show checkpoint history per file.
    - Redo after undo (OpenCode has `unrevert`; others would restore the turn's end tree).
-5. **Model handling.** Per-mode default models. Per-model context limits for local models (OpenCode compacts by them).
-6. **Updates.** Auto-update via electron-builder (zip + `latest-mac.yml` / AppImage update info). Publish signed builds from tagged CI runs.
+6. **Model handling.** Per-mode default models. Per-model context limits for local models (OpenCode compacts by them).
+7. **Updates.** Auto-update via electron-builder (zip + `latest-mac.yml` / AppImage update info). Publish signed builds from tagged CI runs.
 
 ## Later: Learning Space
 

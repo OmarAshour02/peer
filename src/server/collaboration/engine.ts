@@ -8,6 +8,7 @@ import {
   type CheckpointOption,
   type CollaborationModeId,
   type DetectedDecision,
+  type GateKind,
   type GateState,
   type PeerEvent,
   type PeerSession,
@@ -24,8 +25,8 @@ import { changedFiles, restoreFiles, snapshotWorkspace } from "../runtime/git-sn
 import type { RuntimeSet } from "../runtime/set.js";
 import type { Store } from "../store.js";
 import { detectDecision, namesApproved, type Detection } from "./decisions.js";
-import { parseIntent } from "./intent.js";
-import { INTENT_LABELS, getPolicy, resolveEffectivePolicy } from "./policies.js";
+import { isGoAhead, parseIntent } from "./intent.js";
+import { INTENT_LABELS, getPolicy, resolveEffectivePolicy, type PolicyContext } from "./policies.js";
 import { composeSystemPrompt } from "./prompt.js";
 import { isReadOnlyTool } from "./tool-classification.js";
 
@@ -70,6 +71,26 @@ const EMPTY_INTENT_TEXT: Record<TurnIntent, string> = {
   discuss: "Let's discuss this before changing any code.",
   hint: "Can I have a hint?",
   answer: "Please give me the direct answer.",
+  proceed: "Go ahead with the approach we discussed.",
+};
+
+/** What a composer control (or slash command) means when it answers an open question. */
+const ACTION_FOR_INTENT: Record<TurnIntent, CheckpointAction> = {
+  default: "answer",
+  delegate: "go",
+  discuss: "discuss",
+  hint: "hint",
+  answer: "direct",
+  proceed: "skip",
+};
+
+/** The intent a resumed turn carries after the developer answered an interrupted question with a control. */
+const RESUME_INTENT: Partial<Record<CheckpointAction, TurnIntent>> = {
+  hint: "hint",
+  go: "delegate",
+  direct: "answer",
+  discuss: "discuss",
+  skip: "proceed",
 };
 
 /** Sent for the developer when Peer continues engaged work in a writable turn (sandboxFixedPerTurn). */
@@ -201,11 +222,23 @@ export class CollaborationEngine {
   // ---------------------------------------------------------------------------
   // Sessions and turns
 
+  /** A mode switch applies from the next message, and ends a "Discuss first" discussion (a temporary override). */
   setMode(sessionId: string, mode: CollaborationModeId): PeerSession {
     const before = this.requireSession(sessionId);
     if (before.mode === mode) return before;
-    const session = this.store.updateSession(sessionId, { mode });
+    const session = this.store.updateSession(sessionId, { mode, discussing: false });
     this.store.logEvent(sessionId, "mode.changed", { from: before.mode, to: mode });
+    if (before.discussing) this.store.logEvent(sessionId, "discussion.ended", { by: "mode.changed" });
+    this.emit({ type: "session.updated", session });
+    return session;
+  }
+
+  /** Start or end "Discuss first" for the session's next messages. Code already unlocked stays unlocked. */
+  setDiscussing(sessionId: string, discussing: boolean, by: string): PeerSession {
+    const before = this.requireSession(sessionId);
+    if (before.discussing === discussing) return before;
+    const session = this.store.updateSession(sessionId, { discussing });
+    this.store.logEvent(sessionId, discussing ? "discussion.started" : "discussion.ended", { by });
     this.emit({ type: "session.updated", session });
     return session;
   }
@@ -218,17 +251,27 @@ export class CollaborationEngine {
     const session = this.requireSession(sessionId);
     const pending = this.liveCheckpoint(sessionId);
     if (pending) {
-      if (!rawText.trim()) throw new EngineError("Answer cannot be empty");
-      const action: CheckpointAction = explicitIntent === "delegate" ? "delegate" : explicitIntent === "hint" ? "hint" : "answer";
-      const checkpoint = await this.resolveCheckpoint(pending.id, { action, text: rawText.trim() });
+      // A control (or slash command) answers the open question with its own action.
+      const { intent, text } = parseIntent(rawText, explicitIntent);
+      let action = ACTION_FOR_INTENT[intent];
+      if (action === "answer" && !text) throw new EngineError("Answer cannot be empty");
+      // While discussing, a reply that only says "go ahead" is the choice to proceed.
+      const turn = pending.turnId ? this.store.getTurn(pending.turnId) : null;
+      if (action === "answer" && turn && lockKind(turn) === "hold" && turn.engagedAt === null && isGoAhead(text)) action = "skip";
+      const checkpoint = await this.resolveCheckpoint(pending.id, { action, text: text || undefined });
       return { kind: "checkpoint-answered", checkpoint };
     }
     if (this.statusOf(sessionId) !== "idle") {
       throw new EngineError("The agent is still working. Wait for it to finish or stop it first.", 409);
     }
     if (this.undoing.has(sessionId)) throw new EngineError("Peer is undoing the last turn. Send your message once it is done.", 409);
-    const { intent, text } = parseIntent(rawText, explicitIntent);
-    const turn = await this.startTurn(session, text || EMPTY_INTENT_TEXT[intent], intent, false);
+    let { intent, text } = parseIntent(rawText, explicitIntent);
+    // "Discuss first" lasts until the developer proceeds: a plain follow-up keeps discussing.
+    const wasDiscussing = session.discussing;
+    if (wasDiscussing && intent === "default") intent = isGoAhead(text) ? "proceed" : "discuss";
+    const discussing = intent === "discuss" || (wasDiscussing && intent === "hint");
+    const turn = await this.startTurn(session, text || EMPTY_INTENT_TEXT[intent], intent, false, null, { continuingDiscussion: wasDiscussing && intent === "discuss" });
+    this.setDiscussing(sessionId, discussing, `turn.${intent}`);
     return { kind: "turn-started", turn };
   }
 
@@ -259,21 +302,32 @@ export class CollaborationEngine {
       const current = this.store.getSession(sessionId);
       if (!current) return;
       this.store.logEvent(sessionId, "turn.continued", { fromTurnId: turnId });
-      this.startTurn(current, CONTINUATION_TEXT, "default", false, turnId).catch((err) => {
+      // "Just do it", "Direct answer" and Proceed last for the task, so its continuation keeps them.
+      const ended = this.store.getTurn(turnId);
+      const intent: TurnIntent = ended?.intent === "delegate" || ended?.intent === "answer" || ended?.intent === "proceed" ? ended.intent : "default";
+      this.startTurn(current, CONTINUATION_TEXT, intent, false, turnId).catch((err) => {
         this.store.logEvent(sessionId, "turn.continue_failed", { fromTurnId: turnId, error: err instanceof Error ? err.message : String(err) });
       });
     });
   }
 
   /** `continuedFrom`: the turn a continuation carries on; it shares that turn's checkpoint budget. */
-  private async startTurn(session: PeerSession, text: string, intent: TurnIntent, isResume: boolean, continuedFrom: string | null = null): Promise<Turn> {
+  private async startTurn(
+    session: PeerSession,
+    text: string,
+    intent: TurnIntent,
+    isResume: boolean,
+    continuedFrom: string | null = null,
+    extra: Pick<PolicyContext, "continuingDiscussion"> = {},
+  ): Promise<Turn> {
     this.finishActiveTurn(session.id);
     const previous = this.store.latestTurn(session.id);
     const isContinuation = continuedFrom !== null;
     // A developer reply after a gated turn in which they did not engage is the engagement. A
     // continuation carries on work the developer already engaged with.
-    const awaitingEngagement = isResume || isContinuation || (previous !== null && previous.gate !== "open" && previous.engagedAt === null);
-    let plan = resolveEffectivePolicy(session.mode, intent, awaitingEngagement);
+    const awaitingEngagement = isResume || isContinuation || (previous !== null && isLocked(previous));
+    const context: PolicyContext = { ...extra, hintLevel: intent === "hint" ? this.hintsInARow(session.id) + 1 : undefined, handsOff: this.handsOff(session.id) };
+    let plan = resolveEffectivePolicy(session.mode, intent, awaitingEngagement, context);
     // Same task, same budget: the continuation is told what is left of it.
     if (continuedFrom) plan = { ...plan, checkpointBudget: Math.max(0, plan.checkpointBudget - this.checkpointsUsed(continuedFrom)) };
     const turn = this.store.createTurn({ sessionId: session.id, mode: session.mode, intent, gate: plan.gate, continuedFrom });
@@ -305,7 +359,10 @@ export class CollaborationEngine {
         this.emit({ type: "session.status", sessionId: session.id, status: "idle" });
         return turn;
       }
-      const system = composeSystemPrompt(plan, runtime.checkpointTool);
+      const system = composeSystemPrompt(plan, runtime.checkpointTool, {
+        decided: this.decidedSoFar(session.id),
+        previousTurnLocked: previous !== null && (previous.gate !== "open" || previous.relockedAt !== null),
+      });
       await runtime.prompt(directory, session.runtimeSessionId, {
         text,
         system: untold > 0 ? `${system}\n\n${undoneNote(untold)}` : system,
@@ -363,18 +420,21 @@ export class CollaborationEngine {
   gateFor(sessionId: string): GateState {
     const turn = this.store.latestTurn(sessionId);
     if (!turn || turn.endedAt !== null) return { kind: "open", locked: false, reason: null };
+    const kind = lockKind(turn);
     if (this.liveCheckpoint(sessionId)) {
-      return { kind: turn.gate, locked: true, reason: "Waiting for your response to a checkpoint." };
+      return { kind, locked: true, reason: "Waiting for your response to a checkpoint." };
     }
-    if (turn.gate !== "open" && turn.engagedAt === null) {
+    if (isLocked(turn)) {
       const label = getPolicy(turn.mode).label;
       const reason =
-        turn.gate === "engage"
+        kind === "engage"
           ? `${label} mode: code changes unlock once you engage with this task.`
-          : `"${INTENT_LABELS[turn.intent]}": no code changes this turn unless you skip ahead.`;
-      return { kind: turn.gate, locked: true, reason };
+          : turn.intent === "discuss"
+            ? "Discussing: no code changes until you choose to proceed."
+            : `"${INTENT_LABELS[turn.intent]}": no code changes this turn unless you proceed.`;
+      return { kind, locked: true, reason };
     }
-    return { kind: turn.gate, locked: false, reason: null };
+    return { kind, locked: false, reason: null };
   }
 
   /**
@@ -390,9 +450,20 @@ export class CollaborationEngine {
     if (!gate.locked) return this.checkDecision(session, tool, args);
 
     this.store.logEvent(session.id, "gate.blocked", { tool, reason: gate.reason });
+    const active = this.activeTurn(session.id);
+    if (active && !this.liveCheckpoint(session.id) && this.routineContested(active.id)) {
+      // Told once with the denial (Codex hears it through turn/steer).
+      return {
+        allow: false,
+        explain: true,
+        reason: `Peer collaboration gate: "${tool}" was not run. The developer said this task is not routine work: ask them your question with ${this.checkpointToolFor(session)} before changing code. Reading and exploring the code is still allowed.`,
+      };
+    }
     const how = this.liveCheckpoint(session.id)
       ? "Wait for the developer's response to your open checkpoint."
-      : `Engage the developer first: ask your question with the ${this.checkpointToolFor(session)} tool (or finish your turn with it). For purely mechanical work, ask for a go-ahead with a "confirm" checkpoint.`;
+      : lockKind(this.store.latestTurn(session.id)!) === "engage"
+        ? `Engage the developer first: ask your question with the ${this.checkpointToolFor(session)} tool (or finish your turn with it). If the work is routine and needs nothing from them, say so with ${this.checkpointToolFor(session)} category "routine" instead of asking.`
+        : `The developer wants no code changes until they choose to proceed; continue the discussion, or finish your turn.`;
     return {
       allow: false,
       reason: `Peer collaboration gate: "${tool}" was not run. ${gate.reason} ${how} Reading and exploring the code is still allowed. Do not try to work around this gate.`,
@@ -555,18 +626,10 @@ export class CollaborationEngine {
     const turn = this.activeTurn(session.id);
     const mode = turn?.mode ?? session.mode;
     const intent = turn?.intent ?? "default";
-    const plan = resolveEffectivePolicy(mode, intent, false);
-
-    let declined: string | null = null;
-    if (!plan.askFor.includes(input.category)) {
-      const qualifier = intent === "default" ? "" : ` with "${INTENT_LABELS[intent]}"`;
-      declined = `${plan.policy.label} mode${qualifier} leaves ${input.category} decisions to you`;
-    } else if (input.category !== "risk" && turn && this.checkpointsUsed(turn.id) >= plan.checkpointBudget) {
-      declined = `the developer-facing checkpoint budget for this turn (${plan.checkpointBudget}) is used up`;
-    }
-
-    if (declined) {
-      const checkpoint = this.store.createCheckpoint({
+    const handsOff = this.handsOff(session.id);
+    const plan = resolveEffectivePolicy(mode, intent, false, { handsOff });
+    const record = (resolution: Checkpoint["resolution"]) =>
+      this.store.createCheckpoint({
         ...input,
         sessionId: session.id,
         turnId: turn?.id ?? null,
@@ -574,9 +637,44 @@ export class CollaborationEngine {
         source: "agent",
         decision: null,
         status: "auto_resolved",
-        resolution: { action: "policy", by: "policy", note: declined },
+        resolution,
       });
-      this.store.logEvent(session.id, "checkpoint.declined", { checkpointId: checkpoint.id, category: input.category, reason: declined });
+
+    // Not a question: the agent says the work is routine. Never asked; in Learn it unlocks code changes,
+    // unless the developer already said this task is not routine.
+    if (input.category === "routine") {
+      const contested = turn !== null && this.routineContested(turn.id);
+      const unlocks = turn !== null && !contested && lockKind(turn) === "engage" && isLocked(turn);
+      if (unlocks) this.store.markTurnEngaged(turn.id);
+      const checkpoint = record({
+        action: "policy",
+        by: "policy",
+        note: contested ? "routine work: refused, the developer said this task is not routine" : unlocks ? "routine work: no question asked, code changes unlocked" : "routine work: no question asked",
+      });
+      this.store.logEvent(session.id, "checkpoint.routine", { checkpointId: checkpoint.id, question: input.question, unlocked: unlocks });
+      this.emit({ type: "checkpoint.updated", checkpoint });
+      if (unlocks) this.emit({ type: "gate.updated", sessionId: session.id, gate: this.gateFor(session.id) });
+      return { checkpoint, output: this.agentOutput(checkpoint) };
+    }
+
+    // The same question, already answered by the developer in this task, is not asked again.
+    const earlier = input.category === "risk" || !turn ? null : this.answeredBefore(turn, input.question);
+    let declined: string | null = null;
+    if (earlier) {
+      declined = "the developer already answered this question in this task";
+    } else if (!plan.askFor.includes(input.category)) {
+      const qualifier = intent === "default" ? "" : ` with "${INTENT_LABELS[intent]}"`;
+      declined =
+        handsOff && plan.policy.askFor.includes(input.category) && intent === "default"
+          ? `the developer handed their last decisions back, so Peer leaves ${input.category} decisions to you for now`
+          : `${plan.policy.label} mode${qualifier} leaves ${input.category} decisions to you`;
+    } else if (input.category !== "risk" && turn && this.checkpointsUsed(turn.id) >= plan.checkpointBudget) {
+      declined = `this turn already reached Peer's ceiling of ${plan.checkpointBudget} question${plan.checkpointBudget === 1 ? "" : "s"}`;
+    }
+
+    if (declined) {
+      const checkpoint = record({ action: "policy", by: "policy", note: declined, ...(earlier ? { repeatOf: earlier.id } : {}) });
+      this.store.logEvent(session.id, "checkpoint.declined", { checkpointId: checkpoint.id, category: input.category, reason: declined, repeatOf: earlier?.id });
       this.emit({ type: "checkpoint.updated", checkpoint });
       return { checkpoint, output: this.agentOutput(checkpoint) };
     }
@@ -671,7 +769,10 @@ export class CollaborationEngine {
     this.live.delete(id);
 
     const turn = cp.turnId ? this.store.getTurn(cp.turnId) : null;
-    if (wasLive && turn && engages(turn, input.action)) this.store.markTurnEngaged(turn.id);
+    // A hint on a Peer-held dependency call only denies that call and asks again on retry.
+    // Agent questions use the task-wide hint hold; keep the dependency reasoning loop intact.
+    if (wasLive && turn) this.applyControl(turn, input.action, cp.decision !== null);
+    else this.applyDiscussion(cp.sessionId, input.action);
     this.store.logEvent(cp.sessionId, "checkpoint.resolved", {
       checkpointId: id,
       category: cp.category,
@@ -692,7 +793,12 @@ export class CollaborationEngine {
         ? `Resuming after an interruption. Before ${cp.decision.action} ran, Peer paused it to ask me about it.\n\n${this.agentOutput(resolved)}`
         : `Resuming after an interruption. Earlier you asked me (via ${this.checkpointToolFor(session)}): "${cp.question}"\n\n${this.agentOutput(resolved)}`;
       try {
-        await this.startTurn(session, resumeText, input.action === "hint" ? "hint" : "default", true);
+        // This is the same task. Ordinary answers must retain an existing override; only an
+        // explicit control replaces it. A mode switch or End discussion can retire the hold.
+        const inherited = session.discussing ? "discuss"
+          : turn?.mode === session.mode && !this.modeChangedSince(turn) && (turn.intent === "delegate" || turn.intent === "answer" || (turn.intent === "hint" && isLocked(turn))) ? turn.intent
+          : "default";
+        await this.startTurn(session, resumeText, RESUME_INTENT[input.action] ?? inherited, true, turn?.id ?? null);
       } catch (err) {
         this.emit({ type: "checkpoint.updated", checkpoint: this.store.updateCheckpoint(id, "interrupted", null) });
         throw err;
@@ -700,6 +806,55 @@ export class CollaborationEngine {
     }
     this.emit({ type: "gate.updated", sessionId: cp.sessionId, gate: this.gateFor(cp.sessionId) });
     return resolved;
+  }
+
+  /**
+   * What a response does to the rest of the turn: engaging unlocks code changes; "Just do it" and
+   * "Direct answer" change the turn's intent (so later questions are declined accordingly); "Discuss
+   * first" or a hint locks code changes again until the developer proceeds; Proceed retires them.
+   */
+  private applyControl(turn: Turn, action: CheckpointAction, heldDependency = false) {
+    if (engages(turn, action)) this.store.markTurnEngaged(turn.id);
+    if (action === "skip" && (turn.intent === "discuss" || turn.intent === "hint")) this.store.setTurnIntent(turn.id, "proceed");
+    if (action === "go") this.store.setTurnIntent(turn.id, "delegate");
+    if (action === "direct") this.store.setTurnIntent(turn.id, "answer");
+    if (action === "discuss" || (action === "hint" && !heldDependency)) {
+      this.store.setTurnIntent(turn.id, action);
+      this.store.relockTurn(turn.id);
+    }
+    this.applyDiscussion(turn.sessionId, action);
+  }
+
+  /** "Discuss first" continues into the next messages; proceeding in any form ends it. */
+  private applyDiscussion(sessionId: string, action: CheckpointAction) {
+    if (action === "discuss") this.setDiscussing(sessionId, true, "checkpoint.discuss");
+    else if (action === "skip" || action === "go" || action === "direct") this.setDiscussing(sessionId, false, `checkpoint.${action}`);
+  }
+
+  /**
+   * The developer says work the agent declared routine is not routine ("Not routine, ask me"):
+   * Learn's lock closes again for the rest of the turn, and further routine declarations in it are
+   * refused. Only while that turn runs; changes already made stay (Undo takes them back).
+   */
+  contestRoutine(checkpointId: string): Checkpoint {
+    const cp = this.store.getCheckpoint(checkpointId);
+    if (!cp) throw new EngineError(`Unknown checkpoint ${checkpointId}`, 404);
+    if (cp.category !== "routine" || !cp.resolution?.note?.includes("unlocked")) throw new EngineError("Only routine work that unlocked code changes can be contested.", 409);
+    const turn = cp.turnId ? this.store.getTurn(cp.turnId) : null;
+    if (!turn || turn.endedAt !== null || this.activeTurn(cp.sessionId)?.id !== turn.id) throw new EngineError("That task is no longer running; your next message starts a new one.", 409);
+    this.store.clearEngagement(turn.id);
+    const updated = this.store.updateCheckpoint(cp.id, "auto_resolved", { ...cp.resolution, note: "routine work: the developer said it is not routine; code changes locked again" });
+    this.store.logEvent(cp.sessionId, "checkpoint.routine_contested", { checkpointId: cp.id, turnId: turn.id });
+    this.emit({ type: "checkpoint.updated", checkpoint: updated });
+    this.emit({ type: "gate.updated", sessionId: cp.sessionId, gate: this.gateFor(cp.sessionId) });
+    return updated;
+  }
+
+  private routineContested(turnId: string): boolean {
+    const turn = this.store.getTurn(turnId);
+    if (!turn) return false;
+    const task = new Set(this.taskTurnIds(turnId));
+    return this.store.listEvents(turn.sessionId).some((e) => e.type === "checkpoint.routine_contested" && task.has(String(e.payload.turnId)));
   }
 
   cancelCheckpoint(id: string, note: string) {
@@ -721,12 +876,14 @@ export class CollaborationEngine {
     const turn = cp.turnId ? this.store.getTurn(cp.turnId) : null;
     const session = this.store.getSession(cp.sessionId);
     const fixedSandbox = session !== null && this.runtimes.has(session.runtime) && this.runtimes.get(session.runtime).sandboxFixedPerTurn === true;
+    const wasLocked = turn !== null && (turn.gate !== "open" || turn.relockedAt !== null);
     const unlocked =
-      turn && turn.gate !== "open" && turn.engagedAt !== null
-        ? fixedSandbox
+      turn && wasLocked && turn.engagedAt !== null
+        ? fixedSandbox && turn.gate !== "open"
           ? " Code changes are now unlocked, but this turn's sandbox stays read-only: do not try to edit files now. Say in one or two sentences what you will do, then end your turn. Peer starts a new turn with write access right away."
           : " Code changes are now unlocked."
         : "";
+    const added = r?.text ? ` and added: "${r.text}"` : "";
     if (!r) return "The checkpoint has no response yet.";
     if (cp.decision) {
       const decision = heldCallDecision(cp, this.hintNumber(cp));
@@ -735,16 +892,41 @@ export class CollaborationEngine {
         : decision.reason;
     }
     switch (r.action) {
-      case "policy":
+      case "policy": {
+        if (cp.category === "routine") {
+          if (r.note?.includes("refused")) return `Peer did not accept this: the developer said this task is not routine. Ask them your question with ${session ? this.checkpointToolFor(session) : "the checkpoint tool"} before changing code.`;
+          if (unlocked) return `Peer recorded this as routine work without asking the developer.${unlocked}`;
+          return turn && isLocked(turn)
+            ? "Peer recorded this, but code changes stay locked this turn: the developer asked for a hint or to discuss first, which routine work does not override. Do not attempt edits."
+            : "Peer recorded this as routine work without asking the developer. Continue.";
+        }
+        if (r.repeatOf) {
+          const earlier = this.store.getCheckpoint(r.repeatOf);
+          const said = earlier ? describeResponse(earlier) : "they answered it";
+          return `Peer did not ask again: the developer already answered this question in this task (${said}). Build on that answer and continue.`;
+        }
+        if (turn?.intent === "discuss" && cp.category === "confirm") {
+          return "Peer did not ask the developer for a go-ahead: while discussing, they choose when to proceed (Proceed, Just do it, or a message saying go ahead). Do not modify files; end your turn with a short summary of what you would implement.";
+        }
+        if (turn?.intent === "answer" && (cp.category === "hypothesis" || cp.category === "concept")) {
+          return `Peer did not ask the developer: ${r.note}. They want the direct answer, not a question: answer it yourself in your reply, directly and with the reasoning, then continue.`;
+        }
         return `Peer did not ask the developer: ${r.note}. Decide yourself${rec}, mention the decision and why in your final summary, and continue.`;
+      }
       case "answer":
         return `The developer answered: "${r.text}". Take this into account and continue.${unlocked}`;
       case "choose":
-        return `The developer chose "${r.option}"${r.text ? ` and added: "${r.text}"` : ""}. Proceed with it.${unlocked}`;
+        return `The developer chose "${r.option}"${added}. Proceed with it.${unlocked}`;
       case "delegate":
-        return `The developer delegated this decision to you${r.text ? ` and added: "${r.text}"` : ""}. Make the call yourself${rec}, state your choice in one sentence, and continue.${unlocked}`;
+        return `The developer delegated this decision to you${added}. Make the call yourself${rec}, state your choice in one sentence, and continue.${unlocked}`;
       case "skip":
         return `The developer chose to skip this discussion and wants you to proceed with the implementation${r.text ? ` (note: "${r.text}")` : ""}. Use your recommended approach and briefly explain the key idea as you go.${unlocked}`;
+      case "go":
+        return `The developer said "Just do it"${added}: proceed with the rest of this task without further optional questions or discussion. Use your recommended approach${rec}, make the remaining decisions yourself, and summarize them at the end. Risky or irreversible steps still need the developer.${unlocked}`;
+      case "direct":
+        return `The developer asked for the direct answer${added}. Answer your question yourself in your reply, directly and completely with the reasoning; do not ask it again or quiz them. Then continue the task.${unlocked}`;
+      case "discuss":
+        return `The developer wants to discuss this before any further code changes${r.text ? `: "${r.text}"` : ""}. Respond to that: lay out the options, their trade-offs and your recommendation. Code changes are locked until they choose to proceed; do not attempt edits.`;
       case "hint": {
         const n = this.hintNumber(cp);
         const tool = session ? this.checkpointToolFor(session) : "the checkpoint tool";
@@ -891,6 +1073,16 @@ export class CollaborationEngine {
     return turn && turn.endedAt === null ? turn : null;
   }
 
+  /** Mode switches retire overrides even when the developer switches away and back. */
+  private modeChangedSince(turn: Turn): boolean {
+    let started = false;
+    for (const event of this.store.listEvents(turn.sessionId)) {
+      if (event.type === "turn.started" && event.payload.turnId === turn.id) started = true;
+      else if (started && event.type === "mode.changed") return true;
+    }
+    return false;
+  }
+
   liveCheckpoint(sessionId: string): Checkpoint | null {
     for (const id of this.live) {
       const cp = this.store.getCheckpoint(id);
@@ -905,11 +1097,94 @@ export class CollaborationEngine {
    * checkpoints Peer opens itself: they are not the agent's questions.
    */
   private checkpointsUsed(turnId: string): number {
-    const turn = this.store.getTurn(turnId);
-    const turnIds = turn?.continuedFrom ? [turnId, turn.continuedFrom] : [turnId];
-    return turnIds
+    return this.taskTurnIds(turnId)
       .flatMap((id) => this.store.listCheckpointsForTurn(id))
       .filter((c) => c.source === "agent" && c.category !== "risk" && c.status !== "auto_resolved" && c.resolution?.action !== "hint").length;
+  }
+
+  /** All turns carrying on the same task, including repeated recovery and sandbox continuations. */
+  private taskTurnIds(turnId: string): string[] {
+    const ids = new Set<string>();
+    for (let id: string | null = turnId; id && !ids.has(id); id = this.store.getTurn(id)?.continuedFrom ?? null) ids.add(id);
+    return [...ids];
+  }
+
+  /** Checkpoints the developer answered themselves, outside undone turns, oldest first. */
+  private answeredByDeveloper(sessionId: string): Checkpoint[] {
+    const undone = (turnId: string | null) => turnId !== null && (this.store.getTurn(turnId)?.undoneAt ?? null) !== null;
+    return this.store
+      .listCheckpoints(sessionId)
+      .filter((c) => c.status === "resolved" && c.resolution?.by === "human" && !undone(c.turnId))
+      .sort((a, b) => (a.resolvedAt ?? 0) - (b.resolvedAt ?? 0));
+  }
+
+  /**
+   * An earlier question in this task (the turn, and the turn a continuation carries on) with the
+   * same wording that the developer answered, not with a hint or "discuss first". Only within the
+   * task: generic wording ("Ready to implement?") recurs across tasks for different decisions.
+   */
+  private answeredBefore(turn: Turn, question: string): Checkpoint | null {
+    const q = normalizeQuestion(question);
+    if (!q) return null;
+    const task = new Set(this.taskTurnIds(turn.id));
+    const matches = this.answeredByDeveloper(turn.sessionId).filter(
+      (c) => c.turnId !== null && task.has(c.turnId) && c.source === "agent" && c.resolution?.action !== "hint" && c.resolution?.action !== "discuss" && normalizeQuestion(c.question) === q,
+    );
+    return matches.at(-1) ?? null;
+  }
+
+  /** Decisions the developer made earlier in the session, for the agent (the last six). */
+  private decidedSoFar(sessionId: string): string[] {
+    const lines: string[] = [];
+    for (const cp of this.answeredByDeveloper(sessionId)) {
+      const action = cp.resolution?.action;
+      if (action === "hint" || action === "discuss") continue;
+      if (cp.decision) {
+        const outcome = decisionOutcome(cp);
+        if (outcome) lines.push(`Adding ${list(cp.decision.subjects)}: ${outcome === "approved" ? "approved" : "declined (do not add it)"}.`);
+        continue;
+      }
+      lines.push(`"${clip(cp.question, 160)}": ${describeResponse(cp)}.`);
+    }
+    return lines.slice(-6);
+  }
+
+  /** Turns in a row, newest first, that the developer started with "Give me a hint". */
+  private hintsInARow(sessionId: string): number {
+    let n = 0;
+    for (const turn of this.store.listTurns(sessionId)) {
+      if (turn.undoneAt !== null || turn.continuedFrom !== null) continue;
+      if (turn.intent !== "hint") break;
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * Whether the developer's last two responses in this session handed decisions back: a task sent
+   * with "Just do it" or "Direct answer", or a question answered with Just do it, You decide or
+   * Direct answer. Answering in their own words, choosing an option, discussing, asking for a hint
+   * or proceeding after a discussion counts as engaging and resets it. Peer's own dependency questions do not count.
+   */
+  private handsOff(sessionId: string): boolean {
+    const undone = (turnId: unknown) => typeof turnId === "string" && (this.store.getTurn(turnId)?.undoneAt ?? null) !== null;
+    const signals: boolean[] = [];
+    // The event log is in order, so the latest two responses are the last two signals.
+    for (const e of this.store.listEvents(sessionId)) {
+      if (e.type === "turn.started") {
+        if (e.payload.resume || e.payload.continuation || undone(e.payload.turnId)) continue;
+        const intent = e.payload.intent as TurnIntent;
+        if (intent === "delegate" || intent === "answer") signals.push(true);
+        else if (intent === "discuss" || intent === "hint" || intent === "proceed") signals.push(false);
+      } else if (e.type === "checkpoint.resolved") {
+        const cp = typeof e.payload.checkpointId === "string" ? this.store.getCheckpoint(e.payload.checkpointId) : null;
+        if (!cp || cp.source !== "agent" || undone(cp.turnId)) continue;
+        const action = e.payload.action as CheckpointAction;
+        signals.push(action === "go" || action === "delegate" || action === "direct");
+      }
+    }
+    const last = signals.slice(-2);
+    return last.length === 2 && last.every(Boolean);
   }
 
   private hintNumber(cp: Checkpoint): number {
@@ -953,10 +1228,65 @@ export class CollaborationEngine {
   }
 }
 
+/** The lock a turn is under: its start gate, or "hold" after a mid-turn discussion or hint. */
+function lockKind(turn: Turn): GateKind {
+  return turn.relockedAt !== null ? "hold" : turn.gate;
+}
+
+/** Code changes are locked until the developer engages (or proceeds, for a "hold" lock). */
+function isLocked(turn: Turn): boolean {
+  return (turn.gate !== "open" || turn.relockedAt !== null) && turn.engagedAt === null;
+}
+
+/**
+ * Whether a response releases the turn's lock. Learn's "engage" lock opens on any engagement but a
+ * hint or a wish to discuss; a "hold" (Discuss first, Hint) opens only when the developer proceeds.
+ */
 function engages(turn: Turn, action: CheckpointAction): boolean {
-  if (turn.gate === "engage") return action !== "hint";
-  if (turn.gate === "hold") return action === "skip";
-  return false;
+  switch (lockKind(turn)) {
+    case "engage":
+      return action !== "hint" && action !== "discuss";
+    case "hold":
+      return action === "skip" || action === "go" || action === "direct";
+    case "open":
+      return false;
+  }
+}
+
+/** A comparable form of a question: case, punctuation and spacing do not make it a new one. */
+function normalizeQuestion(q: string): string {
+  return q.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+function clip(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** How the developer responded to a question, in a few words for the agent. */
+function describeResponse(cp: Checkpoint): string {
+  const r = cp.resolution;
+  const text = r?.text ? clip(r.text, 200) : "";
+  switch (r?.action) {
+    case "choose":
+      return `they chose "${r.option}"${text ? ` and added "${text}"` : ""}`;
+    case "answer":
+      return `they answered "${text}"`;
+    case "delegate":
+      return "they left it to you";
+    case "skip":
+      return "they said to proceed with your recommendation";
+    case "go":
+      return 'they said "Just do it"';
+    case "direct":
+      return "they asked for the direct answer";
+    case "discuss":
+      return "they wanted to discuss it first";
+    case "hint":
+      return "they asked for a hint";
+    default:
+      return "they answered it";
+  }
 }
 
 function normalizeCheckpointRequest(req: CheckpointRequest): {
@@ -1027,10 +1357,18 @@ function heldCallDecision(cp: Checkpoint, hint: number): ToolDecision {
   const paused = `Peer paused ${d.action} to ask the developer about ${what(d)}`;
   const deny = (reason: string): ToolDecision => ({ allow: false, explain: true, reason: `Peer collaboration: ${reason}` });
   if (!r || r.action === "cancelled") return deny(`${paused}, and the question was cancelled${r?.note ? ` (${r.note})` : ""}. It was not run.`);
+  const them = d.subjects.length > 1 ? "them" : "it";
+  if (r.action === "discuss") {
+    return deny(`${paused}; the developer wants to discuss it before any code changes${r.text ? ` ("${r.text}")` : ""}. It was not run. Discuss whether ${list(d.subjects)} ${d.subjects.length > 1 ? "are" : "is"} needed here, and the alternatives; code changes stay locked until they choose to proceed.`);
+  }
   switch (decisionOutcome(cp)) {
     case "declined":
       return deny(`${paused}. They decided against it${r.text ? ` and said: "${r.text}"` : ""}. It was not run. Continue without ${d.subjects.length > 1 ? "them" : "it"}; Peer rejects further attempts in this session unless the developer asks for ${d.subjects.length > 1 ? "them" : "it"}.`);
     case "approved":
+      // Learn's "Direct answer": the agent explains the decision itself, then the retry runs.
+      if (r.action === "direct") {
+        return deny(`${paused} first. It was not run yet. They asked for the direct answer${r.text ? ` and added: "${r.text}"` : ""}: in two or three sentences, explain why this task needs ${list(d.subjects)} and what the alternative without ${them} would be. Then run it again; Peer will not ask about it again.`);
+      }
       // Their words go to the agent first; the retry then runs without asking again.
       if (!r.text || r.action === "policy") return { allow: true };
       if (d.style === "reasoning" && r.action === "answer") {
@@ -1049,7 +1387,7 @@ function decisionOutcome(cp: Checkpoint): "approved" | "declined" | null {
   if (!r) return null;
   if (r.action === "policy") return "approved";
   if (r.action === "choose") return r.option === DECISION_DECLINE ? "declined" : "approved";
-  if (r.action === "answer" || r.action === "delegate" || r.action === "skip") return "approved";
+  if (r.action === "answer" || r.action === "delegate" || r.action === "skip" || r.action === "go" || r.action === "direct") return "approved";
   return null;
 }
 
@@ -1065,7 +1403,7 @@ function developerWords(cp: Checkpoint): { text: string; choice: boolean }[] {
   const words = r.text ? [{ text: r.text, choice: false }] : [];
   // Option labels are explicit choices; the rest is prose that has to ask for the package.
   if (r.action === "choose" && r.option) words.push({ text: r.option, choice: true });
-  const accepted = r.action === "delegate" || r.action === "skip" || (r.action === "choose" && (r.option === cp.recommendation || cp.options.length === 1));
+  const accepted = r.action === "delegate" || r.action === "skip" || r.action === "go" || (r.action === "choose" && (r.option === cp.recommendation || cp.options.length === 1));
   if (accepted && cp.recommendation && r.action !== "choose") words.push({ text: cp.recommendation, choice: true });
   if (accepted && cp.category === "confirm") words.push({ text: cp.question, choice: false }, { text: cp.context ?? "", choice: false });
   return words;

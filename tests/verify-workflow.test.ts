@@ -314,6 +314,15 @@ describe("eval:integration guards", () => {
     expect(assessResults("modes", [{ runtime: "claude", mode: "learn", firstEditAfterEngagement: "edits happened without a checkpoint" }]).verdict).toBe("FAIL");
   });
 
+  it("v02 cases are assessed by their harness; a plan larger than --max-runs is refused before anything starts", () => {
+    const out = assessResults("v02", [{ runtime: "claude", scenario: "discuss-first", violations: ["files changed on a turn that must not change code (step 1)"], deviations: [] }]);
+    expect(out).toMatchObject({ verdict: "FAIL", violations: ["claude/discuss-first: files changed on a turn that must not change code (step 1)"] });
+    expect(assessResults("v02", [{ runtime: "codex", scenario: "mechanical-learn", violations: [], deviations: ["asked 1 question(s) on mechanical work"] }]).verdict).toBe("NEEDS_MANUAL_REVIEW");
+    const r = spawnSync(process.execPath, [join(ROOT, "scripts", "verify", "eval-integration.mjs"), "--target", "claude:claude/haiku", "--target", "codex:codex/gpt-6-luna", "--suite", "v02", "--max-runs", "5"], { encoding: "utf8", env: cleanEnv() });
+    expect(r.status).toBe(3);
+    expect(r.stderr).toMatch(/more than --max-runs 5/);
+  });
+
   it("refuses to run without an explicit target, before starting anything", () => {
     const r = spawnSync(process.execPath, [join(ROOT, "scripts", "verify", "eval-integration.mjs")], { encoding: "utf8", env: cleanEnv() });
     expect(r.status).toBe(3);
