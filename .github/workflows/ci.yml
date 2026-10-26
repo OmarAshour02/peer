@@ -126,10 +126,14 @@ jobs:
           sudo apt-get install -y ./release/*.deb
           xvfb-run -a node scripts/smoke-packaged.mjs --exec /opt/Peer/peer
 
+      # Installers are ~330 MB each; upload them only for a manual run, so pushes and PRs
+      # don't fill the repository's Actions storage quota.
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
         with:
           name: peer-${{ matrix.target }}
           if-no-files-found: error
+          retention-days: 3
           path: |
             release/*.dmg
             release/*.zip
