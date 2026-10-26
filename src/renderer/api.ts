@@ -115,12 +115,14 @@ export class PeerApi {
   snapshot = (sessionId: string) => this.request<SessionSnapshot>("GET", `/sessions/${sessionId}`);
   messages = (sessionId: string) => this.request<PeerMessage[]>("GET", `/sessions/${sessionId}/messages`);
   diff = (sessionId: string) => this.request<FileDiff[]>("GET", `/sessions/${sessionId}/diff`);
-  updateSession = (sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string; autoApprovals?: boolean }) =>
+  updateSession = (sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string; autoApprovals?: boolean; discussing?: boolean }) =>
     this.request<PeerSession>("PATCH", `/sessions/${sessionId}`, patch);
   undoTurn = (sessionId: string) => this.request<UndoResult>("POST", `/sessions/${sessionId}/undo`);
   deleteSession = (sessionId: string) => this.request("DELETE", `/sessions/${sessionId}`);
   send = (sessionId: string, text: string, intent: TurnIntent) => this.request("POST", `/sessions/${sessionId}/messages`, { text, intent });
   abort = (sessionId: string) => this.request("POST", `/sessions/${sessionId}/abort`);
+  /** "Not routine, ask me": the agent's routine work in Learn is not routine; its lock closes again. */
+  contestRoutine = (id: string) => this.request<Checkpoint>("POST", `/checkpoints/${id}/contest`);
   resolveCheckpoint = (id: string, action: CheckpointAction, extra: { text?: string; option?: string } = {}) =>
     this.request<Checkpoint>("POST", `/checkpoints/${id}/resolve`, { action, ...extra });
   replyPermission = (id: string, reply: PermissionReply) => this.request("POST", `/permissions/${id}/reply`, { reply });

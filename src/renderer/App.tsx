@@ -237,7 +237,7 @@ function EmptyState({ hasWorkspace, sessionSelected }: { hasWorkspace: boolean; 
         <div className="text-[18px] font-semibold">AI coding that makes you better, not just faster.</div>
         <p className="mt-2 text-[13px] leading-relaxed text-muted">
           {hasWorkspace
-            ? "Start a new session from the sidebar. Pick a collaboration mode next to the prompt: Focus to execute, Collaborate to work as a team, Learn to build understanding."
+            ? "Start a new session from the sidebar. Pick a mode next to the prompt: Collaborate to engineer it together with a teammate, Learn to build your understanding while the work gets done."
             : "Open a project folder to begin. The agent can only work inside folders you choose."}
         </p>
       </div>

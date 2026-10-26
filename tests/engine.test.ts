@@ -144,7 +144,7 @@ describe("collaboration gate", () => {
     const { checkpoint: a } = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "tradeoff", question: "LRU or TTL?" });
     await engine().resolveCheckpoint(a!.id, { action: "answer", text: "TTL" });
     expect((await write(s)).allow).toBe(false); // answering a question is not permission to implement
-    const { checkpoint: b } = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "confirm", question: "Implement now?" });
+    const { checkpoint: b } = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "requirement", question: "Cache the list endpoint too?" });
     await engine().resolveCheckpoint(b!.id, { action: "skip" });
     expect((await write(s)).allow).toBe(true);
   });
@@ -199,7 +199,7 @@ describe("checkpoints", () => {
     await engine().resolveCheckpoint(first.checkpoint!.id, { action: "delegate" });
     const second = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "requirement", question: "Q2" });
     expect(second.checkpoint!.status).toBe("auto_resolved");
-    expect(second.output).toMatch(/budget/);
+    expect(second.output).toMatch(/ceiling of 1 question/);
     const risk = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "risk", question: "Q3" });
     expect(risk.checkpoint!.status).toBe("pending");
   });
@@ -420,19 +420,19 @@ describe("runtimes whose sandbox is fixed per turn (Codex)", () => {
 
   it("the continuation shares the task's checkpoint budget instead of getting a fresh one", async () => {
     runtime.sandboxFixedPerTurn = true;
-    const { s } = await engagedLearnTurn(); // 1 of Learn's 4 used in the read-only turn
+    const { s } = await engagedLearnTurn(); // 1 of Learn's 3 used in the read-only turn
     idle(s);
     await flush();
-    expect(runtime.lastPrompt().input.system).toContain("At most 3 checkpoint(s) this turn");
+    expect(runtime.lastPrompt().input.system).toContain("Peer declines questions beyond 2 in this turn");
     const ask = (question: string, category: "tradeoff" | "risk" = "tradeoff") => engine().requestCheckpoint(s.runtimeSessionId, null, { category, question });
-    for (const q of ["A?", "B?", "C?"]) {
+    for (const q of ["A?", "B?"]) {
       const { checkpoint } = await ask(q);
       expect(checkpoint!.status, q).toBe("pending");
       await engine().resolveCheckpoint(checkpoint!.id, { action: "answer", text: "ok" });
     }
-    const fifth = await ask("D?");
-    expect(fifth.checkpoint!.status).toBe("auto_resolved");
-    expect(fifth.output).toMatch(/budget for this turn \(4\) is used up/);
+    const fourth = await ask("C?");
+    expect(fourth.checkpoint!.status).toBe("auto_resolved");
+    expect(fourth.output).toMatch(/ceiling of 3 questions/);
     // Risk questions stay exempt.
     expect((await ask("Drop the table?", "risk")).checkpoint!.status).toBe("pending");
   });
@@ -449,7 +449,7 @@ describe("runtimes whose sandbox is fixed per turn (Codex)", () => {
     idle(s);
     await service.send(s.id, "now add a test for 304 responses");
     expect(store.latestTurn(s.id)!.continuedFrom).toBeNull();
-    expect(runtime.lastPrompt().input.system).toContain("At most 4 checkpoint(s) this turn");
+    expect(runtime.lastPrompt().input.system).toContain("Peer declines questions beyond 3 in this turn");
   });
 
   it("leaves other runtimes unchanged: they unlock within the same turn", async () => {
@@ -661,7 +661,8 @@ describe("decisions Peer detects itself (new dependencies)", () => {
     for (let i = 0; i < 3; i++) {
       const { checkpoint } = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "tradeoff", question: `Q${i}` });
       expect(checkpoint!.status).toBe("pending");
-      await engine().resolveCheckpoint(checkpoint!.id, { action: "delegate" });
+      // Answered in their own words: handing decisions back would narrow the questions instead.
+      await engine().resolveCheckpoint(checkpoint!.id, { action: "answer", text: `A${i}` });
     }
     const { checkpoint } = await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "tradeoff", question: "Q4" });
     expect(checkpoint!.status).toBe("auto_resolved");

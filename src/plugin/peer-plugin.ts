@@ -8,6 +8,7 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin/tool";
 import { isReadOnlyTool } from "../server/collaboration/tool-classification.js";
+import { CHECKPOINT_CATEGORIES } from "../shared/types.js";
 
 const BRIDGE_URL = process.env.PEER_BRIDGE_URL;
 const BRIDGE_TOKEN = process.env.PEER_BRIDGE_TOKEN;
@@ -53,7 +54,7 @@ export const PeerCollaboration: Plugin = async () => {
         description: CHECKPOINT_DESCRIPTION,
         args: {
           category: tool.schema
-            .enum(["architecture", "tradeoff", "requirement", "risk", "hypothesis", "concept", "confirm"])
+            .enum(CHECKPOINT_CATEGORIES)
             .describe("Kind of decision"),
           question: tool.schema.string().describe("The question, one or two sentences"),
           context: tool.schema.string().optional().describe("Why this matters / what you found in the code"),

@@ -7,6 +7,7 @@ import { streamSSE } from "hono/streaming";
 import {
   CHECKPOINT_ACTIONS,
   COLLABORATION_MODES,
+  isPrimaryMode,
   TURN_INTENTS,
   type CheckpointAction,
   type CollaborationModeId,
@@ -169,6 +170,7 @@ export function createApp(deps: AppDeps): Hono {
   api.patch("/preferences", async (c) => {
     const body = await c.req.json<{ defaultMode?: unknown; defaultRuntime?: unknown; lastSessionId?: unknown }>();
     if (body.defaultMode !== undefined && !isMode(body.defaultMode)) return c.json({ error: "Unknown mode" }, 400);
+    if (body.defaultMode !== undefined && !isPrimaryMode(body.defaultMode)) return c.json({ error: "Focus is retired as a default; use collaborate or learn." }, 400);
     if (body.defaultRuntime !== undefined && (typeof body.defaultRuntime !== "string" || !service.runtimes.has(body.defaultRuntime))) {
       return c.json({ error: "Unknown runtime" }, 400);
     }
@@ -316,15 +318,17 @@ export function createApp(deps: AppDeps): Hono {
   });
   api.patch("/sessions/:id", async (c) => {
     try {
-      const body = await c.req.json<{ mode?: unknown; model?: unknown; title?: unknown; autoApprovals?: unknown }>();
+      const body = await c.req.json<{ mode?: unknown; model?: unknown; title?: unknown; autoApprovals?: unknown; discussing?: unknown }>();
       if (body.mode !== undefined && !isMode(body.mode)) return c.json({ error: "Unknown mode" }, 400);
       if (body.autoApprovals !== undefined && typeof body.autoApprovals !== "boolean") return c.json({ error: "autoApprovals must be true or false" }, 400);
+      if (body.discussing !== undefined && typeof body.discussing !== "boolean") return c.json({ error: "discussing must be true or false" }, 400);
       return c.json(
         service.updateSession(c.req.param("id"), {
           mode: body.mode as CollaborationModeId | undefined,
           model: parseModel(body.model),
           title: typeof body.title === "string" ? body.title : undefined,
           autoApprovals: body.autoApprovals as boolean | undefined,
+          discussing: body.discussing as boolean | undefined,
         }),
       );
     } catch (err) {
@@ -380,6 +384,13 @@ export function createApp(deps: AppDeps): Hono {
     }
   });
 
+  api.post("/checkpoints/:id/contest", (c) => {
+    try {
+      return c.json(service.engine.contestRoutine(c.req.param("id")));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
   api.post("/checkpoints/:id/resolve", async (c) => {
     try {
       const body = await c.req.json<{ action?: unknown; text?: unknown; option?: unknown }>();

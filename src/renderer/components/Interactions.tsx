@@ -2,7 +2,7 @@ import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Checkpoint, CheckpointAction, CollaborationModeId, PermissionReply, PermissionRequest } from "../../shared/types";
-import { CATEGORY_UI } from "../modes";
+import { CATEGORY_UI, CONTROL_UI } from "../modes";
 import { usePeer } from "../store";
 
 function useAct() {
@@ -26,6 +26,10 @@ function useAct() {
 /** A decision the agent brought to the developer. Pending checkpoints block the agent. */
 export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoint; mode: CollaborationModeId }) {
   const { api, busy, run } = useAct();
+  // While discussing, the way out of the discussion is to proceed.
+  const discussing = usePeer((s) => s.snapshot?.session.discussing === true || (s.snapshot?.gate.locked === true && s.snapshot.gate.kind === "hold"));
+  // The turn this checkpoint belongs to is still running.
+  const running = usePeer((s) => s.snapshot?.turn?.id === cp.turnId && s.snapshot?.turn?.endedAt === null && s.snapshot?.status !== "idle");
   const [text, setText] = useState("");
   const open = cp.status === "pending" || cp.status === "interrupted";
   const resolve = (action: CheckpointAction, extra: { text?: string; option?: string } = {}) =>
@@ -39,6 +43,43 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
         <div className="mt-0.5">
           {cp.context} {cp.resolution?.note}.
         </div>
+      </div>
+    );
+  }
+
+  if (cp.status === "auto_resolved" && cp.category === "routine") {
+    return (
+      <div className="my-2 rounded-md border border-dashed border-line px-3 py-2 text-[12px] text-faint">
+        <span className="text-muted">Routine work, no question asked:</span> {cp.question}
+        {cp.resolution?.note?.includes("unlocked") && (
+          <div className="mt-1 flex items-center gap-2">
+            <span>Code changes unlocked for this task.</span>
+            {running && (
+              <button
+                disabled={busy}
+                onClick={() => run(() => api!.contestRoutine(cp.id))}
+                title="This task deserves your reasoning: lock code changes again until the agent asks you"
+                className="rounded border border-line px-2 py-0.5 text-[11.5px] text-muted hover:text-fg disabled:opacity-40"
+              >
+                Not routine, ask me
+              </button>
+            )}
+          </div>
+        )}
+        {cp.resolution?.note?.includes("refused") ? (
+          <div className="mt-0.5">Not accepted: you said this task is not routine.</div>
+        ) : (
+          cp.resolution?.note?.includes("not routine") && <div className="mt-0.5">You said this is not routine; the agent asks you before changing code.</div>
+        )}
+      </div>
+    );
+  }
+
+  if (cp.status === "auto_resolved" && cp.resolution?.repeatOf) {
+    return (
+      <div className="my-2 rounded-md border border-dashed border-line px-3 py-2 text-[12px] text-faint">
+        <span className="text-muted">Not asked again:</span> {cp.question}
+        <div className="mt-0.5">You already answered this in this session; the agent was given your earlier answer.</div>
       </div>
     );
   }
@@ -115,24 +156,33 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
             <Btn primary disabled={busy || !text.trim()} onClick={() => resolve("answer", { text })}>
               Answer
             </Btn>
-            {mode === "learn" && (
-              <Btn disabled={busy} onClick={() => resolve("hint", { text: text || undefined })}>
-                Give me a hint
-              </Btn>
+            {mode === "learn" ? (
+              <>
+                <Btn disabled={busy} onClick={() => resolve("hint", { text: text || undefined })} title={CONTROL_UI.hint.hint}>
+                  {CONTROL_UI.hint.label}
+                </Btn>
+                <Btn disabled={busy} onClick={() => resolve("direct", { text: text || undefined })} title={CONTROL_UI.answer.hint}>
+                  {CONTROL_UI.answer.label}
+                </Btn>
+              </>
+            ) : (
+              <>
+                <Btn disabled={busy} onClick={() => resolve("discuss", { text: text || undefined })} title={CONTROL_UI.discuss.hint}>
+                  {CONTROL_UI.discuss.label}
+                </Btn>
+                {discussing && !peer && (
+                  <Btn disabled={busy} onClick={() => resolve("skip", { text: text || undefined })} title="Stop discussing and implement the agreed approach">
+                    Proceed
+                  </Btn>
+                )}
+                <Btn disabled={busy} onClick={() => resolve("go", { text: text || undefined })} title={CONTROL_UI.delegate.hint}>
+                  {CONTROL_UI.delegate.label}
+                </Btn>
+              </>
             )}
-            <Btn disabled={busy} onClick={() => resolve("delegate", { text: text || undefined })} title={peer ? "Let the agent go ahead" : "Let the agent make this call"}>
+            <Btn disabled={busy} onClick={() => resolve("delegate", { text: text || undefined })} title={peer ? "Let the agent go ahead" : "Let the agent make this one call"}>
               You decide
             </Btn>
-            {!peer && (
-              <Btn disabled={busy} onClick={() => resolve("skip", { text: text || undefined })} title="Skip the discussion and implement">
-                Skip to implementation
-              </Btn>
-            )}
-            {mode !== "learn" && !peer && (
-              <Btn disabled={busy} onClick={() => resolve("hint", { text: text || undefined })}>
-                Hint
-              </Btn>
-            )}
           </div>
         </div>
       ) : (
@@ -142,7 +192,10 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
             {r.action === "choose" && <>chose “{r.option}”</>}
             {r.action === "answer" && <>“{r.text}”</>}
             {r.action === "delegate" && <>delegated the decision to the agent</>}
-            {r.action === "skip" && <>skipped to implementation</>}
+            {r.action === "skip" && <>chose to proceed</>}
+            {r.action === "go" && <>said Just do it (the agent decides the rest of this task)</>}
+            {r.action === "direct" && <>asked for the direct answer</>}
+            {r.action === "discuss" && <>asked to discuss first</>}
             {r.action === "hint" && <>asked for a hint</>}
             {r.action === "cancelled" && <>{r.note}</>}
             {r.text && r.action !== "answer" && <> · “{r.text}”</>}

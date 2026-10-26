@@ -25,7 +25,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", async (original) => ({
   },
 }));
 
-const { ClaudeCodeAdapter, describeSuggestions, sessionGrants } = await import("../src/server/runtime/claude/adapter.js");
+const { ClaudeCodeAdapter, CLAUDE_POLICY_NOTE, describeSuggestions, sessionGrants } = await import("../src/server/runtime/claude/adapter.js");
 
 // What Claude Code 2.1.310 suggested for `cat ../outside/note.txt` in a real run (Haiku, 2026-10-24).
 const SUGGESTIONS: PermissionUpdate[] = [
@@ -143,5 +143,37 @@ describe("Claude Code 'Always allow'", () => {
     await adapter.prompt(dir, "s1", { text: "second", system: "", gate: "open" });
     expect(calls[1]!.options.allowedTools).toBeUndefined();
     calls.at(-1)!.end();
+  });
+});
+
+describe("Claude Code per-turn policy", () => {
+  let dir: string;
+  let store: Store;
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "peer-claude-policy-")));
+    store = new Store(":memory:");
+    calls.length = 0;
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // A resumed Claude Code session keeps the system prompt of its first query (CLI 2.1.310, probed
+  // with Haiku: turn 2's new append was ignored), so each turn's policy goes in its message.
+  it("sends each turn's policy with its message, not only in the system prompt", async () => {
+    const adapter = new ClaudeCodeAdapter({ env: {}, storage: store, hooks: { checkTool: async () => ({ allow: true }), checkpoint: async () => "" }, dataDir: join(dir, ".peer"), log: () => {} });
+    Object.assign(adapter as object, { current: { state: "ready" }, binary: "/usr/bin/false" });
+    await adapter.prompt(dir, "s1", { text: "Why does it 404?", system: "POLICY ONE: hint, no code changes", gate: "hold" });
+    calls.at(-1)!.end();
+    await vi.waitFor(() => expect((adapter as unknown as { runs: Map<string, unknown> }).runs.size).toBe(0));
+    await adapter.prompt(dir, "s1", { text: "Just fix it", system: "POLICY TWO: code changes allowed", gate: "open" });
+    expect(calls[0]!.prompt).toBe("<peer_collaboration_policy>\nPOLICY ONE: hint, no code changes\n</peer_collaboration_policy>\n\nWhy does it 404?");
+    expect(calls[1]!.prompt).toBe("<peer_collaboration_policy>\nPOLICY TWO: code changes allowed\n</peer_collaboration_policy>\n\nJust fix it");
+    for (const c of calls) expect(c.options.systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: CLAUDE_POLICY_NOTE });
+    calls.at(-1)!.end();
+    // Peer's transcript shows the developer's words only.
+    const users = (await adapter.getMessages(dir, "s1")).filter((m) => m.role === "user").flatMap((m) => m.parts.map((p) => (p.type === "text" ? p.text : "")));
+    expect(users).toEqual(["Why does it 404?", "Just fix it"]);
   });
 });
