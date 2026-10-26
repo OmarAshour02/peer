@@ -288,9 +288,15 @@ class TomlParser {
           out += String.fromCodePoint(cp);
           this.i += 2 + len;
         } else if (triple && /^[ \t]*\r?\n/.test(this.s.slice(this.i + 1))) {
-          // Line-ending backslash: trim the newline and following whitespace.
+          // Line-ending backslash: trim TOML whitespace (space, tab) and newlines (LF, CRLF) only.
+          // Anything else is left for the loop: control characters make the document invalid.
           this.i++;
-          while (/\s/.test(this.s[this.i] ?? "")) this.i++;
+          for (;;) {
+            const w = this.s[this.i];
+            if (w === " " || w === "\t" || w === "\n") this.i++;
+            else if (w === "\r" && this.s[this.i + 1] === "\n") this.i += 2;
+            else break;
+          }
         } else {
           throw new TomlError(`bad escape \\${e}`);
         }

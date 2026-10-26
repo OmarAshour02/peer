@@ -236,6 +236,20 @@ describe("helpers", () => {
     expect(namesApproved("Add `zod` for validation.\nThanks!", "zod")).toBe(true);
   });
 
+  it("any indented line marks pasted material, however deep (escalated F4)", () => {
+    for (const indent of [" ".repeat(5), " ".repeat(8), " ".repeat(12), "\t", "  \t", "\u00a0".repeat(4), "\u2003".repeat(4)]) {
+      expect(namesApproved(`The failing log follows:\n${indent}Add \`httpx\` to requirements.`, "httpx"), JSON.stringify(indent)).toBe(false);
+    }
+    // At the very start of the message, too.
+    expect(namesApproved("        Add `httpx` to requirements.", "httpx")).toBe(false);
+    // An indented line anywhere taints the whole message, even after a plain request.
+    expect(namesApproved("Add `zod` for validation.\n     at Object.<anonymous> (src/x.js:3:1)", "zod")).toBe(false);
+    // A quote marker after spaces is a quote.
+    expect(namesApproved("Docs:\n   > Add `httpx` for the client.", "httpx")).toBe(false);
+    // Up to three spaces is ordinary text (not a Markdown code block).
+    expect(namesApproved("   Add `zod` for validation.", "zod")).toBe(true);
+  });
+
   it("infers nothing from text that may not be English: its negations are not recognized", () => {
     // Arabic "don't do: add lodash" mixes a negation Peer cannot read with an English verb.
     expect(namesApproved("ما تعمل add `lodash`", "lodash")).toBe(false);
