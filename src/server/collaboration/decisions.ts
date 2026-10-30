@@ -1,9 +1,10 @@
 // Detects consequential engineering decisions in an agent's tool call before it runs, from the
 // call's arguments alone, so Peer can involve the developer whatever the model decides to ask.
 //
-// Deliberately narrow. Today it recognizes new dependencies: an installer command that names
-// packages, or an edit/write/patch that adds an entry to a dependency manifest. It does not see
-// indirect changes (a script, generator or `node -e` that edits a manifest), and it reads the
+// Deliberately narrow. Today it recognizes new dependencies (an installer command that names
+// packages, or an edit/write/patch that adds an entry to a dependency manifest) and changes to public
+// API contracts (an edit/write/patch to a spec file, or to `exports`/`bin` in package.json). It does
+// not see indirect changes (a script, generator or `node -e` that edits a file), and it reads the
 // manifest from disk, so its answer is only as current as the workspace. A missed detection means
 // Peer does not ask; a detection never changes what the tool does.
 import { readFileSync, statSync } from "node:fs";
@@ -11,11 +12,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import type { DecisionKind } from "../../shared/types.js";
 import { normalizePypi, pipfileDependencies, pyprojectDependencies, setupCfgDependencies, setupPyDependencies } from "./python-manifests.js";
 
+type Ecosystem = "npm" | "pypi" | "crates" | "go";
+
 export interface Detection {
   kind: DecisionKind;
-  /** New dependency names, deduplicated, in the order they appear. */
+  /** New dependency names or changed contracts, deduplicated, in the order they appear. */
   subjects: string[];
-  ecosystem: "npm" | "pypi" | "crates" | "go";
+  ecosystem: Ecosystem | "api";
   /** The action, as shown to the developer and the agent. */
   action: string;
 }
@@ -48,8 +51,6 @@ export function detectDecision(tool: string, args: unknown, workspace: string, r
 
 // ---------------------------------------------------------------------------
 // Installer commands
-
-type Ecosystem = Detection["ecosystem"];
 
 interface Install {
   ecosystem: Ecosystem;
@@ -362,20 +363,34 @@ function requirementNames(text: string): Set<string> {
   return names;
 }
 
-/** The files a write-like tool call would produce, as (path, content after the call). */
-function editedFiles(tool: string, a: Record<string, unknown>, workspace: string, read: ReadFile): { path: string; before: string | null; after: string | null; added: string[] }[] {
-  const pathOf = (p: unknown) => {
-    if (typeof p !== "string" || !p) return null;
-    const abs = isAbsolute(p) ? p : resolve(workspace, p);
-    // Changes outside the workspace are a safety matter (denied or asked separately), not this one.
-    return inside(workspace, abs) ? abs : null;
-  };
+/** The absolute path of a tool argument. Changes outside the workspace are a safety matter (denied or asked separately), not this one. */
+function workspacePath(p: unknown, workspace: string): string | null {
+  if (typeof p !== "string" || !p) return null;
+  const abs = isAbsolute(p) ? p : resolve(workspace, p);
+  return inside(workspace, abs) ? abs : null;
+}
+
+/** A file a write-like tool call would produce. */
+interface EditedFile {
+  path: string;
+  before: string | null;
+  /** The content after the call; null when Peer can't work it out. */
+  after: string | null;
+  added: string[];
+  /** A hunk's old lines occur more than once, so `after` may have changed the wrong place. */
+  ambiguous?: boolean;
+  /** An edit's old text isn't literally in the file: it fails, or the tool matches loosely (OpenCode). */
+  unmatched?: boolean;
+}
+
+function editedFiles(tool: string, a: Record<string, unknown>, workspace: string, read: ReadFile): EditedFile[] {
+  const pathOf = (p: unknown) => workspacePath(p, workspace);
   const str = (v: unknown) => (typeof v === "string" ? v : undefined);
 
   const patch = tool === "apply_patch" || tool === "patch";
   // Codex: a fileChange's changes, each with its own diff.
   if (patch && Array.isArray(a.changes)) {
-    return (a.changes as { path?: unknown; kind?: { type?: unknown }; diff?: unknown }[]).flatMap((c) => {
+    return (a.changes as { path?: unknown; kind?: { type?: unknown }; diff?: unknown }[]).flatMap((c): EditedFile[] => {
       const path = pathOf(c.path);
       if (!path || !manifestFor(path)) return [];
       const before = read(path);
@@ -383,17 +398,18 @@ function editedFiles(tool: string, a: Record<string, unknown>, workspace: string
       const type = c.kind?.type;
       if (type === "delete") return [];
       if (type === "add") return [{ path, before: null, after: stripAddedPrefix(diff), added: [] }];
-      return [{ path, before, after: applyHunks(before ?? "", diffLines(diff)), added: addedLines(diffLines(diff)) }];
+      const lines = diffLines(diff);
+      return [{ path, before, after: applyHunks(before ?? "", lines), added: addedLines(lines), ambiguous: hunksAmbiguous(before ?? "", lines) }];
     });
   }
   // OpenCode's apply_patch (the "*** Begin Patch" format).
   if (patch && typeof a.patchText === "string") {
-    return parsePatchText(a.patchText).flatMap((f) => {
+    return parsePatchText(a.patchText).flatMap((f): EditedFile[] => {
       const path = pathOf(f.path);
       if (!path || !manifestFor(path) || f.type === "delete") return [];
       if (f.type === "add") return [{ path, before: null, after: stripAddedPrefix(f.lines.join("\n")), added: [] }];
       const before = read(path);
-      return [{ path, before, after: applyHunks(before ?? "", f.lines), added: addedLines(f.lines) }];
+      return [{ path, before, after: applyHunks(before ?? "", f.lines), added: addedLines(f.lines), ambiguous: hunksAmbiguous(before ?? "", f.lines) }];
     });
   }
 
@@ -406,17 +422,20 @@ function editedFiles(tool: string, a: Record<string, unknown>, workspace: string
   if (tool === "edit" || tool === "multiedit") {
     const before = read(path);
     const edits = Array.isArray(a.edits) ? (a.edits as Record<string, unknown>[]) : [a];
-    let after: string | null = before ?? "";
+    let after = before ?? "";
+    const added: string[] = [];
+    let unmatched = false;
     for (const e of edits) {
       const from = str(e.oldString ?? e.old_string);
       const to = str(e.newString ?? e.new_string);
-      if (after === null || from === undefined || to === undefined) return [];
+      if (from === undefined || to === undefined) return [];
       const all = (e.replaceAll ?? e.replace_all) === true;
+      added.push(...to.split("\n"));
       if (from === "") after = to;
-      else if (!after.includes(from)) after = null;
+      else if (!after.includes(from)) unmatched = true;
       else after = all ? after.split(from).join(to) : after.replace(from, () => to);
     }
-    return after === null ? [] : [{ path, before, after, added: [] }];
+    return unmatched ? [{ path, before, after: null, added, unmatched }] : [{ path, before, after, added: [] }];
   }
   return [];
 }
@@ -426,6 +445,7 @@ function detectManifestEdit(tool: string, a: Record<string, unknown>, workspace:
   let ecosystem: Ecosystem = "npm";
   const files: string[] = [];
   for (const f of editedFiles(tool, a, workspace, read)) {
+    if (f.unmatched) continue;
     const manifest = manifestFor(f.path)!;
     const before = f.before === null ? new Set<string>() : manifest.names(f.before);
     const after = f.after === null ? null : manifest.names(f.after);
@@ -463,6 +483,96 @@ function isVersionSpec(v: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Public API contracts
+
+/** Copies, build output, tests and samples: nobody relies on a file here as the project's API. */
+const NOT_THE_PROJECT = new Set(["node_modules", "vendor", "third_party", "third-party", ".git", "dist", "build", "target", "generated", "test", "tests", "__tests__", "testdata", "fixtures", "__fixtures__", "example", "examples"]);
+const PACKAGE_CONTRACT_FIELDS = ["exports", "bin"];
+
+/** A file that defines an API, by its name and location. Its content is not read. */
+export function isContractFile(relativePath: string): boolean {
+  const name = basename(relativePath).toLowerCase();
+  if (name.endsWith(".proto") || name.endsWith(".graphqls")) return true;
+  if (/\.(graphql|gql)$/.test(name)) {
+    // Other .graphql files are usually a client's queries, not the API's schema.
+    return /(^|[._-])schema\.(graphql|gql)$/.test(name) || dirname(relativePath).toLowerCase().split("/").some((d) => d === "schema" || d === "schemas");
+  }
+  return /(^|[._-])(openapi|swagger)([._-][\w.-]*)?\.(ya?ml|json)$/.test(name) && !/(^|[._-])(generator|config|ui)[._-]/.test(name);
+}
+
+function isProjectFile(relativePath: string): boolean {
+  return !dirname(relativePath).toLowerCase().split("/").some((d) => NOT_THE_PROJECT.has(d));
+}
+
+/** Every workspace file a write-like tool call changes, including both ends of a rename. */
+function changedPaths(tool: string, a: Record<string, unknown>, workspace: string): { path: string; deleted: boolean }[] {
+  const out: { path: string; deleted: boolean }[] = [];
+  const add = (p: unknown, deleted = false) => {
+    const path = workspacePath(p, workspace);
+    if (path) out.push({ path, deleted });
+  };
+  const patch = tool === "apply_patch" || tool === "patch";
+  if (patch && Array.isArray(a.changes)) {
+    for (const c of a.changes as { path?: unknown; kind?: { type?: unknown; move_path?: unknown } }[]) {
+      add(c.path, c.kind?.type === "delete");
+      add(c.kind?.move_path);
+    }
+  } else if (patch && typeof a.patchText === "string") {
+    for (const f of parsePatchText(a.patchText)) add(f.path, f.type === "delete");
+    for (const m of a.patchText.matchAll(/^\*\*\* Move to: (.+)$/gm)) add(m[1]!.trim());
+  } else if (tool === "write" || tool === "edit" || tool === "multiedit") {
+    add(a.filePath ?? a.file_path);
+  }
+  return out;
+}
+
+function jsonObject(text: string): Record<string, unknown> | null {
+  try {
+    const json: unknown = JSON.parse(text);
+    return json && typeof json === "object" && !Array.isArray(json) ? (json as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The contract fields of package.json that change. Compared as JSON text, not deep equality: the
+ * order of `exports` conditions is significant. When Peer cannot tell (invalid JSON, a patch it
+ * cannot place with certainty), it asks about any contract field the text mentions.
+ */
+function changedPackageFields(before: string | null, after: string | null, added: string[]): string[] {
+  const was = before === null ? {} : jsonObject(before);
+  const now = after === null ? null : jsonObject(after);
+  if (was && now) return PACKAGE_CONTRACT_FIELDS.filter((k) => JSON.stringify(was[k]) !== JSON.stringify(now[k]));
+  // `\u` is the only JSON escape that can spell a letter of these names ("exp\u006frts").
+  const text = [before ?? "", after ?? "", ...added].join("\n").replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+  return PACKAGE_CONTRACT_FIELDS.filter((k) => text.includes(`"${k}"`));
+}
+
+/** A change to a public API contract a tool call would make, or null. Shell commands are not seen. */
+export function detectContractChange(tool: string, args: unknown, workspace: string, read: ReadFile = readWorkspaceFile): Detection | null {
+  const a = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const rel = (path: string) => relative(workspace, path);
+  const subjects: string[] = [];
+  const files: string[] = [];
+  const found = (file: string, subject = file) => {
+    subjects.push(subject);
+    files.push(file);
+  };
+  const isPackage = (path: string) => basename(path) === "package.json" && isProjectFile(rel(path));
+  for (const { path, deleted } of changedPaths(tool, a, workspace)) {
+    if (isProjectFile(rel(path)) && isContractFile(rel(path))) found(rel(path));
+    if (deleted && isPackage(path)) for (const k of changedPackageFields(read(path), "{}", [])) found(rel(path), `${rel(path)}#${k}`);
+  }
+  for (const f of editedFiles(tool, a, workspace, read)) {
+    // A new-file patch reports no `before`, but it may overwrite a file that exists.
+    if (isPackage(f.path)) for (const k of changedPackageFields(f.before ?? read(f.path), f.ambiguous ? null : f.after, f.added)) found(rel(f.path), `${rel(f.path)}#${k}`);
+  }
+  if (subjects.length === 0) return null;
+  return { kind: "contract", subjects: unique(subjects), ecosystem: "api", action: `an edit to ${unique(files).map((f) => `\`${f}\``).join(", ")}` };
+}
+
+// ---------------------------------------------------------------------------
 // Patches
 
 /** Lines of a unified diff (or a patch section) without file headers. */
@@ -488,18 +598,10 @@ function stripAddedPrefix(text: string): string {
  * Returns null when a hunk does not match, so the caller falls back to the added lines.
  */
 export function applyHunks(before: string, lines: string[]): string | null {
-  const hunks: string[][] = [[]];
-  for (const l of lines) {
-    if (l.startsWith("@@")) hunks.push([]);
-    else if (!l.startsWith("\\")) hunks.at(-1)!.push(l);
-  }
   const src = before.split("\n");
   const out: string[] = [];
   let pos = 0;
-  for (const hunk of hunks) {
-    // A trailing empty line is the patch text's final newline, not a context line.
-    const body = hunk.at(-1) === "" ? hunk.slice(0, -1) : hunk;
-    if (!body.some((l) => l.startsWith("+") || l.startsWith("-"))) continue;
+  for (const body of changingHunks(lines)) {
     const old = body.filter((l) => !l.startsWith("+")).map((l) => l.slice(1));
     const neu = body.filter((l) => !l.startsWith("-")).map((l) => l.slice(1));
     if (old.length === 0) return null;
@@ -510,6 +612,30 @@ export function applyHunks(before: string, lines: string[]): string | null {
   }
   out.push(...src.slice(pos));
   return out.join("\n");
+}
+
+/** Hunks that change something, without the patch text's final newline. */
+function changingHunks(lines: string[]): string[][] {
+  const hunks: string[][] = [[]];
+  for (const l of lines) {
+    if (l.startsWith("@@")) hunks.push([]);
+    else if (!l.startsWith("\\")) hunks.at(-1)!.push(l);
+  }
+  return hunks.map((h) => (h.at(-1) === "" ? h.slice(0, -1) : h)).filter((h) => h.some((l) => l.startsWith("+") || l.startsWith("-")));
+}
+
+/**
+ * Whether a hunk's old lines occur more than once. applyHunks takes the first; the real patch may
+ * mean another (it goes by line number or an anchor Peer ignores).
+ */
+function hunksAmbiguous(before: string, lines: string[]): boolean {
+  const src = before.split("\n").map((l) => l.trimEnd());
+  return changingHunks(lines).some((hunk) => {
+    const old = hunk.filter((l) => !l.startsWith("+")).map((l) => l.slice(1).trimEnd());
+    let matches = 0;
+    for (let i = 0; i + old.length <= src.length && old.length > 0; i++) if (old.every((l, j) => src[i + j] === l)) matches++;
+    return matches > 1;
+  });
 }
 
 function findBlock(src: string[], block: string[], from: number): number {

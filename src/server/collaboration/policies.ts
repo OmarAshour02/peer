@@ -71,7 +71,7 @@ export const POLICIES: Record<CollaborationModeId, CollaborationPolicy> = {
     checkpointBudget: 3,
     defaultGate: "open",
     hints: false,
-    detectedDecisions: { ask: ["dependency"], style: "choice" },
+    detectedDecisions: { ask: ["dependency", "contract"], style: "choice" },
     guidance: [
       "Work like an experienced engineer pairing with a peer: you own the execution; the developer owns the decisions that shape the result.",
       "Collaborate on the decisions that matter: architecture, data model, public interfaces, new dependencies, and trade-offs where capable engineers would reasonably choose differently. Explore the code first, then propose a concrete approach, name the alternative you would not take and why, and say what you recommend.",
@@ -89,7 +89,7 @@ export const POLICIES: Record<CollaborationModeId, CollaborationPolicy> = {
     checkpointBudget: 3,
     defaultGate: "engage",
     hints: true,
-    detectedDecisions: { ask: ["dependency"], style: "reasoning" },
+    detectedDecisions: { ask: ["dependency", "contract"], style: "reasoning" },
     guidance: [
       "The developer wants to understand the work while it still gets done. You remain a fully capable coding agent, and you complete the task.",
       "At the meaningful part of the task (its key decision, the cause of a bug, the concept the change depends on), invite the developer to reason first: ask for their hypothesis or decision in one focused question grounded in this codebase (files, functions, observed behavior), not a generic quiz.",

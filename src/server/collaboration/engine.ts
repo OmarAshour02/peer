@@ -24,7 +24,7 @@ import type { RuntimeEvent } from "../runtime/adapter.js";
 import { changedFiles, restoreFiles, snapshotWorkspace } from "../runtime/git-snapshot.js";
 import type { RuntimeSet } from "../runtime/set.js";
 import type { Store } from "../store.js";
-import { detectDecision, namesApproved, type Detection } from "./decisions.js";
+import { detectContractChange, detectDecision, namesApproved, type Detection } from "./decisions.js";
 import { isGoAhead, parseIntent } from "./intent.js";
 import { INTENT_LABELS, getPolicy, resolveEffectivePolicy, type PolicyContext } from "./policies.js";
 import { composeSystemPrompt } from "./prompt.js";
@@ -60,6 +60,8 @@ export type ToolCheck = ToolDecision | { wait: string };
 /** Options of a Peer-opened "choice" checkpoint. */
 export const DECISION_APPROVE = "Add it";
 export const DECISION_DECLINE = "Don't add it";
+export const CONTRACT_APPROVE = "Change it";
+export const CONTRACT_DECLINE = "Don't change it";
 
 export type SendResult =
   | { kind: "turn-started"; turn: Turn }
@@ -508,22 +510,31 @@ export class CollaborationEngine {
 
   /**
    * Model-independent checkpoints: if the tool call carries a decision the mode wants the developer
-   * to make (today: a new dependency), hold it on a Peer-opened checkpoint. Decisions the developer
-   * already made in this session are applied without asking again.
+   * to make (a new dependency, a public API change), hold it on a Peer-opened checkpoint. Decisions
+   * the developer already made are applied without asking again. A call that carries several asks
+   * about one at a time: the agent retries after each approval.
    */
   private checkDecision(session: PeerSession, tool: string, args: unknown): ToolCheck {
-    let detected: Detection | null;
-    try {
-      detected = detectDecision(tool, args, this.directoryOf(session));
-    } catch (err) {
-      // A bug in detection must not block every call; it is recorded instead of silent.
-      // (Manifest readers already turn their own failures into "not declared", i.e. ask.)
-      this.store.logEvent(session.id, "decision.detect_failed", { tool, error: err instanceof Error ? err.message : String(err) });
-      detected = null;
+    const detected: Detection[] = [];
+    for (const detect of [detectDecision, detectContractChange]) {
+      try {
+        const found = detect(tool, args, this.directoryOf(session));
+        if (found) detected.push(found);
+      } catch (err) {
+        // A bug in detection must not block every call; it is recorded instead of silent.
+        // (Manifest readers already turn their own failures into "not declared", i.e. ask.)
+        this.store.logEvent(session.id, "decision.detect_failed", { tool, error: err instanceof Error ? err.message : String(err) });
+      }
     }
-    if (!detected) return { allow: true };
+    for (const [i, found] of detected.entries()) {
+      const check = this.checkDetected(session, tool, found, i < detected.length - 1);
+      if ("wait" in check || !check.allow) return check;
+    }
+    return { allow: true };
+  }
 
-    const prior = this.priorDecisions(session.id, detected.subjects);
+  private checkDetected(session: PeerSession, tool: string, detected: Detection, more: boolean): ToolCheck {
+    const prior = this.priorDecisions(session.id, detected);
     const declined = detected.subjects.filter((s) => prior.get(s) === "declined");
     const undecided = detected.subjects.filter((s) => !prior.has(s));
     if (declined.length > 0 || undecided.length === 0) {
@@ -533,14 +544,17 @@ export class CollaborationEngine {
       return {
         allow: false,
         explain: true,
-        reason: `Peer collaboration: the developer already decided not to add ${list(declined)} in this session, so ${detected.action} was not run. Continue without ${declined.length > 1 ? "them" : "it"}. If you think they should reconsider, ask them with ${this.checkpointToolFor(session)}.`,
+        reason:
+          detected.kind === "contract"
+            ? `Peer collaboration: the developer already decided not to change ${list(declined)} in this task, so ${detected.action} was not run. Continue without changing ${declined.length > 1 ? "them" : "it"}. If you think they should reconsider, say why in your reply; they can ask for the change in their next message.`
+            : `Peer collaboration: the developer already decided not to add ${list(declined)} in this session, so ${detected.action} was not run. Continue without ${declined.length > 1 ? "them" : "it"}. If you think they should reconsider, ask them with ${this.checkpointToolFor(session)}.`,
       };
     }
     if (undecided.length === 0) return { allow: true };
 
     const turn = this.activeTurn(session.id);
     const plan = resolveEffectivePolicy(turn?.mode ?? session.mode, turn?.intent ?? "default", false);
-    const decision: DetectedDecision = { ...detected, subjects: undecided, style: plan.decisions.style };
+    const decision: DetectedDecision = { ...detected, subjects: undecided, style: plan.decisions.style, ...(more ? { more } : {}) };
     const base = { sessionId: session.id, turnId: turn?.id ?? null, runtimeCallId: null, source: "peer" as const, decision };
 
     if (!plan.decisions.ask.includes(detected.kind)) {
@@ -548,7 +562,7 @@ export class CollaborationEngine {
       const checkpoint = this.store.createCheckpoint({
         ...base,
         category: "architecture",
-        question: `New ${undecided.length > 1 ? "dependencies" : "dependency"}: ${list(undecided)}`,
+        question: detected.kind === "contract" ? `Public API change: ${list(undecided)}` : `New ${undecided.length > 1 ? "dependencies" : "dependency"}: ${list(undecided)}`,
         context: `The agent ran ${detected.action}.`,
         options: [],
         recommendation: null,
@@ -562,7 +576,7 @@ export class CollaborationEngine {
 
     // An earlier question about the same decision that lost its run is replaced by this one.
     for (const old of this.store.listCheckpoints(session.id)) {
-      if (old.status === "interrupted" && old.decision?.subjects.some((s) => undecided.includes(s))) {
+      if (old.status === "interrupted" && old.decision?.kind === detected.kind && old.decision.subjects.some((s) => undecided.includes(s))) {
         const cancelled = this.store.updateCheckpoint(old.id, "cancelled", { action: "cancelled", by: "system", note: "Asked again when the agent retried" });
         this.emit({ type: "checkpoint.updated", checkpoint: cancelled });
       }
@@ -576,23 +590,29 @@ export class CollaborationEngine {
   }
 
   /**
-   * What the developer already decided about each subject in this session, latest signal first:
-   * answers to Peer's own checkpoints, and the developer's own words (messages, answers, chosen
-   * options, approved plans) that name the subject. Subjects with no signal are absent.
+   * What the developer already decided about each subject, latest signal first. A dependency: in
+   * this session, from answers to Peer's own checkpoints and the developer's own words (messages,
+   * answers, chosen options, approved plans) that name the subject. A contract: in this task, from
+   * answers to Peer's own checkpoints only, since approving one API change is not approving the next
+   * and prose can't tell them apart. Subjects with no signal are absent.
    */
-  private priorDecisions(sessionId: string, subjects: string[]): Map<string, "approved" | "declined"> {
+  private priorDecisions(sessionId: string, { kind, subjects }: Detection): Map<string, "approved" | "declined"> {
     const signals: { at: number; subject: string; outcome: "approved" | "declined" }[] = [];
     const words: { at: number; text: string; choice: boolean }[] = [];
-    for (const e of this.store.listEvents(sessionId)) {
-      if (e.type === "turn.started" && !e.payload.resume && !e.payload.continuation && typeof e.payload.text === "string") words.push({ at: e.createdAt, text: e.payload.text, choice: false });
+    const turn = this.activeTurn(sessionId);
+    const task = new Set(kind === "contract" && turn ? this.taskTurnIds(turn.id) : []);
+    if (kind === "dependency") {
+      for (const e of this.store.listEvents(sessionId)) {
+        if (e.type === "turn.started" && !e.payload.resume && !e.payload.continuation && typeof e.payload.text === "string") words.push({ at: e.createdAt, text: e.payload.text, choice: false });
+      }
     }
     for (const cp of this.store.listCheckpoints(sessionId)) {
       const at = cp.resolvedAt ?? cp.createdAt;
-      if (cp.decision) {
+      if (cp.decision?.kind === kind && (kind === "dependency" || (cp.turnId !== null && task.has(cp.turnId)))) {
         const outcome = decisionOutcome(cp);
         if (outcome) for (const subject of cp.decision.subjects) signals.push({ at, subject, outcome });
       }
-      for (const w of developerWords(cp)) words.push({ at, ...w });
+      if (kind === "dependency") for (const w of developerWords(cp)) words.push({ at, ...w });
     }
     for (const subject of subjects) {
       for (const w of words) if (namesApproved(w.text, subject, w.choice)) signals.push({ at: w.at, subject, outcome: "approved" });
@@ -1141,7 +1161,8 @@ export class CollaborationEngine {
       if (action === "hint" || action === "discuss") continue;
       if (cp.decision) {
         const outcome = decisionOutcome(cp);
-        if (outcome) lines.push(`Adding ${list(cp.decision.subjects)}: ${outcome === "approved" ? "approved" : "declined (do not add it)"}.`);
+        if (outcome && cp.decision.kind === "contract") lines.push(`Changing ${list(cp.decision.subjects)}: ${outcome} for that task only; Peer asks again in a new task.`);
+        else if (outcome) lines.push(`Adding ${list(cp.decision.subjects)}: ${outcome === "approved" ? "approved" : "declined (do not add it)"}.`);
         continue;
       }
       lines.push(`"${clip(cp.question, 160)}": ${describeResponse(cp)}.`);
@@ -1324,13 +1345,38 @@ function list(subjects: string[]): string {
 }
 
 function what(d: DetectedDecision): string {
-  return `adding ${list(d.subjects)}`;
+  return `${d.kind === "contract" ? "changing" : "adding"} ${list(d.subjects)}`;
+}
+
+/** "whether `x` is needed here", the thing the developer weighs. */
+function whetherNeeded(d: DetectedDecision): string {
+  const plural = d.subjects.length > 1;
+  return d.kind === "contract" ? `whether ${list(d.subjects)} ${plural ? "need" : "needs"} to change here` : `whether ${list(d.subjects)} ${plural ? "are" : "is"} needed here`;
 }
 
 /** The question Peer asks for a held call, per style. */
 function decisionQuestion(d: DetectedDecision): { category: CheckpointCategory; question: string; context: string; options: CheckpointOption[] } {
   const plural = d.subjects.length > 1;
   const detected = `The agent is about to run ${d.action}. Peer detected this itself and paused it before it runs.`;
+  if (d.kind === "contract") {
+    if (d.style === "reasoning") {
+      return {
+        category: "hypothesis",
+        question: `Before the agent changes ${list(d.subjects)}: why do you think this task needs the public API to change, and what could the change break?`,
+        context: `${detected} Answer in your own words and the agent will respond to your reasoning before it continues, or choose "You decide" to let it go ahead.`,
+        options: [],
+      };
+    }
+    return {
+      category: "architecture",
+      question: `Change the public API: ${list(d.subjects)}?`,
+      context: `${detected} Other code and people may rely on this contract, so a change can break them.`,
+      options: [
+        { label: CONTRACT_APPROVE, description: "Run it as planned" },
+        { label: CONTRACT_DECLINE, description: "The agent continues without changing it" },
+      ],
+    };
+  }
   if (d.style === "reasoning") {
     return {
       category: "hypothesis",
@@ -1359,25 +1405,35 @@ function heldCallDecision(cp: Checkpoint, hint: number): ToolDecision {
   if (!r || r.action === "cancelled") return deny(`${paused}, and the question was cancelled${r?.note ? ` (${r.note})` : ""}. It was not run.`);
   const them = d.subjects.length > 1 ? "them" : "it";
   if (r.action === "discuss") {
-    return deny(`${paused}; the developer wants to discuss it before any code changes${r.text ? ` ("${r.text}")` : ""}. It was not run. Discuss whether ${list(d.subjects)} ${d.subjects.length > 1 ? "are" : "is"} needed here, and the alternatives; code changes stay locked until they choose to proceed.`);
+    return deny(`${paused}; the developer wants to discuss it before any code changes${r.text ? ` ("${r.text}")` : ""}. It was not run. Discuss ${whetherNeeded(d)}, and the alternatives; code changes stay locked until they choose to proceed.`);
   }
+  const contract = d.kind === "contract";
   switch (decisionOutcome(cp)) {
     case "declined":
-      return deny(`${paused}. They decided against it${r.text ? ` and said: "${r.text}"` : ""}. It was not run. Continue without ${d.subjects.length > 1 ? "them" : "it"}; Peer rejects further attempts in this session unless the developer asks for ${d.subjects.length > 1 ? "them" : "it"}.`);
+      return deny(
+        contract
+          ? `${paused}. They decided against it${r.text ? ` and said: "${r.text}"` : ""}. It was not run. Continue without changing ${them}; Peer rejects further attempts in this task, and the developer can ask for the change in a later message.`
+          : `${paused}. They decided against it${r.text ? ` and said: "${r.text}"` : ""}. It was not run. Continue without ${them}; Peer rejects further attempts in this session unless the developer asks for ${them}.`,
+      );
     case "approved":
       // Learn's "Direct answer": the agent explains the decision itself, then the retry runs.
       if (r.action === "direct") {
-        return deny(`${paused} first. It was not run yet. They asked for the direct answer${r.text ? ` and added: "${r.text}"` : ""}: in two or three sentences, explain why this task needs ${list(d.subjects)} and what the alternative without ${them} would be. Then run it again; Peer will not ask about it again.`);
+        const explain = contract ? `why this task needs to change ${list(d.subjects)} and what the alternative would be` : `why this task needs ${list(d.subjects)} and what the alternative without ${them} would be`;
+        return deny(`${paused} first. It was not run yet. They asked for the direct answer${r.text ? ` and added: "${r.text}"` : ""}: in two or three sentences, explain ${explain}. Then run it again; Peer will not ask about it again.`);
       }
       // Their words go to the agent first; the retry then runs without asking again.
-      if (!r.text || r.action === "policy") return { allow: true };
+      if (!r.text || r.action === "policy") {
+        if (!d.more) return { allow: true };
+        // Letting the call run here would carry its other decision past the developer unasked.
+        return deny(`${paused}, and they approved it. It was not run yet: the same call carries another decision Peer has to ask about. Run it again; Peer will not ask about this one again.`);
+      }
       if (d.style === "reasoning" && r.action === "answer") {
         return deny(`${paused} first (Learn mode). It was not run yet. Their reasoning: "${r.text}". Before you continue, respond to it in a few sentences: what it gets right and what it misses, grounded in this codebase. Then continue; if ${what(d)} is still right, run it again (Peer will not ask about it again).`);
       }
       return deny(`${paused}. It was not run yet. They said: "${r.text}". Act on that. If it approves ${what(d)}, run it again; Peer will not ask about it again.`);
     default:
       // A hint: answer it, then try again, and Peer asks again.
-      return deny(`${paused}; they asked for a hint (hint ${hint}${r.text ? `; they added: "${r.text}"` : ""}). It was not run. In your reply, give one short hint that helps them reason about whether ${list(d.subjects)} ${d.subjects.length > 1 ? "are" : "is"} needed here, without giving the answer away. Then run it again; Peer will ask them again.`);
+      return deny(`${paused}; they asked for a hint (hint ${hint}${r.text ? `; they added: "${r.text}"` : ""}). It was not run. In your reply, give one short hint that helps them reason about ${whetherNeeded(d)}, without giving the answer away. Then run it again; Peer will ask them again.`);
   }
 }
 
@@ -1386,7 +1442,7 @@ function decisionOutcome(cp: Checkpoint): "approved" | "declined" | null {
   const r = cp.resolution;
   if (!r) return null;
   if (r.action === "policy") return "approved";
-  if (r.action === "choose") return r.option === DECISION_DECLINE ? "declined" : "approved";
+  if (r.action === "choose") return r.option === DECISION_DECLINE || r.option === CONTRACT_DECLINE ? "declined" : "approved";
   if (r.action === "answer" || r.action === "delegate" || r.action === "skip" || r.action === "go" || r.action === "direct") return "approved";
   return null;
 }

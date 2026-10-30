@@ -6,6 +6,7 @@ export const CHECKPOINT_TOOL = "peer_checkpoint";
 
 const DECISION_DESCRIPTIONS: Record<DecisionKind, string> = {
   dependency: "adding a new dependency (an install command or a manifest edit)",
+  contract: "changing a public API contract (an OpenAPI, protobuf or GraphQL schema file, or `exports`/`bin` in package.json)",
 };
 
 const CATEGORY_DESCRIPTIONS: Record<CheckpointCategory, string> = {
@@ -84,7 +85,7 @@ export function composeSystemPrompt(plan: EffectivePolicy, tool: string = CHECKP
     "- The developer may answer, pick an option, let you decide, ask for a hint or the direct answer, ask to discuss first, or tell you to just do it. Follow the instructions in the tool result.",
     ...(plan.decisions.ask.length > 0
       ? [
-          `- Peer itself pauses some actions before they run and asks the developer: ${plan.decisions.ask.map((k) => DECISION_DESCRIPTIONS[k]).join("; ")}. It does not ask again about one the developer already approved or asked for. If Peer rejects such a call with the developer's response, follow that response.`,
+          `- Peer itself pauses some actions before they run and asks the developer: ${plan.decisions.ask.map((k) => DECISION_DESCRIPTIONS[k]).join("; ")}. It does not ask again about a dependency the developer already approved or asked for, or a contract change they already approved in this task. If Peer rejects such a call with the developer's response, follow that response.`,
         ]
       : []),
     "",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyHunks, commandLines, detectDecision, namesApproved, type ReadFile } from "../src/server/collaboration/decisions.js";
+import { applyHunks, commandLines, detectContractChange, detectDecision, isContractFile, namesApproved, type ReadFile } from "../src/server/collaboration/decisions.js";
 
 const WS = "/ws";
 const PKG = JSON.stringify({ name: "app", scripts: { test: "vitest" }, dependencies: { react: "^19.0.0" }, devDependencies: { vitest: "^5.0.0" } }, null, 2);
@@ -176,6 +176,162 @@ describe("new dependencies from manifest edits", () => {
 
   it("ignores manifests outside the workspace", () => {
     expect(detect("write", { filePath: "/elsewhere/package.json", content: JSON.stringify({ dependencies: { a: "1" } }) })).toBeNull();
+  });
+});
+
+describe("public API contract changes", () => {
+  const contract = (tool: string, args: unknown, read: ReadFile = withPkg) => detectContractChange(tool, args, WS, read);
+  const changed = (tool: string, args: unknown, read?: ReadFile) => contract(tool, args, read)?.subjects ?? null;
+  const edit = (filePath: string) => ({ filePath, oldString: "a", newString: "b" });
+
+  it("recognizes spec files by name and location", () => {
+    for (const path of ["openapi.yaml", "api/openapi.yml", "openapi.json", "swagger.json", "api.swagger.json", "orders.openapi.yaml", "openapi-v2.yaml", "openapi_v2.yml", "OpenAPI.YAML", "openapi-build.yaml", "proto/notes/v1/notes.proto", "api/schema.graphqls", "schema.graphql", "api.schema.gql", "src/schema/notes.graphql", "schemas/notes.gql"]) {
+      expect(changed("edit", edit(path)), path).toEqual([path]);
+    }
+  });
+
+  it("does not take similar files for contracts", () => {
+    for (const path of ["openapitools.json", "openapi-generator-config.yaml", "openapi.config.json", "swagger-ui.json", "swagger.md", "openapi.ts", "schema.json", "schema.ts", "src/queries/notes.graphql", "src/queries/notes.gql", "src/notes.protobuf.ts", "proto.ts"]) {
+      expect(changed("edit", edit(path)), path).toBeNull();
+    }
+  });
+
+  it("ignores vendored, generated, test and sample copies", () => {
+    for (const path of ["node_modules/x/openapi.yaml", "vendor/a.proto", "third_party/a.proto", "dist/openapi.json", "build/schema.graphql", "target/a.proto", "src/generated/a.proto", "tests/fixtures/openapi.yaml", "test/a.proto", "__tests__/openapi.yaml", "testdata/a.proto", "examples/schema.graphql", "Vendor/a.proto"]) {
+      expect(changed("edit", edit(path)), path).toBeNull();
+    }
+    // The folder has to be a parent: a contract named after one still counts.
+    expect(changed("edit", edit("api/build.proto"))).toEqual(["api/build.proto"]);
+  });
+
+  it("every tool shape, including creating, deleting and renaming a spec", () => {
+    expect(changed("write", { filePath: "/ws/openapi.yaml", content: "openapi: 3.1.0" })).toEqual(["openapi.yaml"]);
+    expect(changed("edit", { file_path: "/ws/a.proto", old_string: "a", new_string: "b" })).toEqual(["a.proto"]);
+    expect(changed("edit", { filePath: "a.proto", edits: [{ old_string: "a", new_string: "b" }] })).toEqual(["a.proto"]);
+    expect(changed("apply_patch", { patchText: "*** Begin Patch\n*** Add File: a.proto\n+syntax\n*** Update File: openapi.yaml\n@@\n-a\n+b\n*** Delete File: schema.graphql\n*** End Patch" })).toEqual(["a.proto", "openapi.yaml", "schema.graphql"]);
+    expect(changed("apply_patch", { patchText: "*** Begin Patch\n*** Update File: notes.txt\n*** Move to: a.proto\n@@\n-a\n+b\n*** End Patch" })).toEqual(["a.proto"]);
+    expect(changed("apply_patch", { patchText: "*** Begin Patch\n*** Update File: a.proto\n*** Move to: notes.txt\n@@\n-a\n+b\n*** End Patch" })).toEqual(["a.proto"]);
+    expect(changed("apply_patch", { changes: [{ path: "/ws/a.proto", kind: { type: "delete" }, diff: "" }, { path: "/ws/openapi.yaml", kind: { type: "add" }, diff: "x" }, { path: "/ws/notes.txt", kind: { type: "update", move_path: "/ws/b.proto" }, diff: "" }] })).toEqual(["a.proto", "openapi.yaml", "b.proto"]);
+    expect(contract("apply_patch", { changes: [{ path: "/ws/a.proto", kind: { type: "update" } }, { path: "/ws/b.proto", kind: { type: "update" } }] })?.action).toBe("an edit to `a.proto`, `b.proto`");
+  });
+
+  it("ignores shell commands, reads and files outside the workspace", () => {
+    expect(changed("bash", { command: "sed -i s/a/b/ openapi.yaml" })).toBeNull();
+    expect(changed("read", { filePath: "openapi.yaml" })).toBeNull();
+    expect(changed("edit", edit("/elsewhere/openapi.yaml"))).toBeNull();
+    expect(changed("edit", edit("../openapi.yaml"))).toBeNull();
+    expect(contract("write", null)).toBeNull();
+  });
+
+  describe("exports and bin in package.json", () => {
+    const pkg = (fields: Record<string, unknown>) => JSON.stringify({ name: "app", ...fields }, null, 2);
+    const on = (text: string) => files({ "/ws/package.json": text });
+    const exports = { ".": { import: "./a.mjs", require: "./a.cjs" } };
+
+    it("asks when a field is added, changed or removed, per field", () => {
+      const was = pkg({ exports, bin: { app: "cli.js" } });
+      expect(changed("write", { filePath: "package.json", content: pkg({ exports: { ".": "./b.js" }, bin: { app: "cli.js" } }) }, on(was))).toEqual(["package.json#exports"]);
+      expect(changed("write", { filePath: "package.json", content: pkg({ exports, bin: "x.js" }) }, on(was))).toEqual(["package.json#bin"]);
+      expect(changed("write", { filePath: "package.json", content: pkg({}) }, on(was))).toEqual(["package.json#exports", "package.json#bin"]);
+      expect(changed("write", { filePath: "package.json", content: pkg({ bin: "x.js" }) }, on(pkg({})))).toEqual(["package.json#bin"]);
+      expect(contract("write", { filePath: "package.json", content: pkg({ bin: "x.js" }) }, on(pkg({})))?.action).toBe("an edit to `package.json`");
+    });
+
+    it("the order of exports conditions matters; formatting does not", () => {
+      const swapped = { ".": { require: "./a.cjs", import: "./a.mjs" } };
+      expect(changed("write", { filePath: "package.json", content: pkg({ exports: swapped }) }, on(pkg({ exports })))).toEqual(["package.json#exports"]);
+      expect(changed("write", { filePath: "package.json", content: JSON.stringify({ name: "app", exports }) }, on(pkg({ exports })))).toBeNull();
+    });
+
+    it("other edits to package.json are not contract changes", () => {
+      expect(changed("write", { filePath: "package.json", content: pkg({ exports, version: "2.0.0", main: "x.js" }) }, on(pkg({ exports })))).toBeNull();
+      expect(changed("edit", { filePath: "package.json", oldString: '"app"', newString: '"renamed"' }, on(pkg({ exports })))).toBeNull();
+      // Words inside other fields are not the fields themselves.
+      expect(changed("edit", { filePath: "package.json", oldString: '"app"', newString: '"exports"' }, on(pkg({})))).toBeNull();
+    });
+
+    it("every tool shape, a new file, a deletion, and sub-packages", () => {
+      const was = pkg({ exports });
+      expect(changed("edit", { filePath: "package.json", oldString: "./a.mjs", newString: "./b.mjs" }, on(was))).toEqual(["package.json#exports"]);
+      expect(changed("apply_patch", { changes: [{ path: "/ws/package.json", kind: { type: "update" }, diff: '@@\n-      "import": "./a.mjs",\n+      "import": "./b.mjs",\n' }] }, on(was))).toEqual(["package.json#exports"]);
+      expect(changed("apply_patch", { patchText: '*** Begin Patch\n*** Update File: package.json\n@@\n-      "import": "./a.mjs",\n+      "import": "./b.mjs",\n*** End Patch' }, on(was))).toEqual(["package.json#exports"]);
+      expect(changed("write", { filePath: "web/package.json", content: pkg({ bin: "x.js" }) }, files({}))).toEqual(["web/package.json#bin"]);
+      expect(changed("apply_patch", { changes: [{ path: "/ws/package.json", kind: { type: "delete" }, diff: "" }] }, on(was))).toEqual(["package.json#exports"]);
+      expect(changed("apply_patch", { patchText: "*** Begin Patch\n*** Delete File: package.json\n*** End Patch" }, on(was))).toEqual(["package.json#exports"]);
+      expect(changed("apply_patch", { changes: [{ path: "/ws/package.json", kind: { type: "delete" }, diff: "" }] }, on(pkg({})))).toBeNull();
+    });
+
+    it("asks about a field the text mentions when it cannot tell what changes", () => {
+      // Invalid JSON after the edit.
+      expect(changed("write", { filePath: "package.json", content: '{ "exports": "./a.js", ' }, on(pkg({})))).toEqual(["package.json#exports"]);
+      expect(changed("write", { filePath: "package.json", content: '{ "name": ' }, on(pkg({})))).toBeNull();
+      // A patch Peer cannot apply, that adds or sits next to the field.
+      expect(changed("apply_patch", { changes: [{ path: "/ws/package.json", kind: { type: "update" }, diff: '@@\n-nothing like this\n+  "bin": "x.js",\n' }] }, on(pkg({})))).toEqual(["package.json#bin"]);
+      expect(changed("apply_patch", { changes: [{ path: "/ws/package.json", kind: { type: "update" }, diff: "@@\n-nothing like this\n+other\n" }] }, on(pkg({ exports })))).toEqual(["package.json#exports"]);
+    });
+
+    describe("patches Peer can't place with certainty (review F1)", () => {
+      const repeated = JSON.stringify({ name: "app", imports: { "#api": { default: "./old.js" } }, exports: { ".": { default: "./old.js" } } }, null, 2);
+      const change = ['-      "default": "./old.js"', '+      "default": "./new.js"'];
+
+      it("asks when a hunk's old lines occur more than once, on Codex and OpenCode", () => {
+        // Line 9 is in exports; the first match, in imports, is not what the patch changes.
+        const diff = ["@@ -9,1 +9,1 @@", ...change, ""].join("\n");
+        expect(changed("apply_patch", { changes: [{ path: "/ws/package.json", kind: { type: "update" }, diff }] }, on(repeated))).toEqual(["package.json#exports"]);
+        expect(changed("apply_patch", { patchText: ['*** Begin Patch', '*** Update File: package.json', '@@ "exports": {', ...change, "*** End Patch"].join("\n") }, on(repeated))).toEqual(["package.json#exports"]);
+      });
+
+      it("recognizes a field name spelled with JSON escapes (review F2)", () => {
+        const escaped = repeated.replace('"exports"', '"exp\\u006frts"');
+        expect(Object.keys(JSON.parse(escaped))).toContain("exports");
+        const diff = ["@@ -9,1 +9,1 @@", ...change, ""].join("\n");
+        expect(changed("apply_patch", { changes: [{ path: "/ws/package.json", kind: { type: "update" }, diff }] }, on(escaped))).toEqual(["package.json#exports"]);
+        // Added by the patch, or in content that doesn't parse.
+        expect(changed("apply_patch", { changes: [{ path: "/ws/package.json", kind: { type: "update" }, diff: '@@\n-nothing like this\n+  "b\\u0069n": "x.js",\n' }] }, on(pkg({})))).toEqual(["package.json#bin"]);
+        expect(changed("write", { filePath: "package.json", content: '{ "b\\u0069n": "x.js", ' }, on(pkg({})))).toEqual(["package.json#bin"]);
+        // When both sides parse, the comparison already sees through the escape.
+        expect(changed("write", { filePath: "package.json", content: '{ "name": "app", "b\\u0069n": "x.js" }' }, on(pkg({})))).toEqual(["package.json#bin"]);
+      });
+
+      it("still compares exactly when the hunk's place is unique", () => {
+        const unique = JSON.stringify({ name: "app", imports: { "#api": { default: "./old.js" } }, exports: { ".": { default: "./other.js" } } }, null, 2);
+        expect(changed("apply_patch", { changes: [{ path: "/ws/package.json", kind: { type: "update" }, diff: ["@@", ...change, ""].join("\n") }] }, on(unique))).toBeNull();
+      });
+
+      it("repeated lines in a package without contract fields don't ask", () => {
+        const plain = JSON.stringify({ name: "app", scripts: { a: "x" }, config: { a: "x" } }, null, 2);
+        expect(changed("apply_patch", { changes: [{ path: "/ws/package.json", kind: { type: "update" }, diff: '@@\n-    "a": "x"\n+    "a": "y"\n' }] }, on(plain))).toBeNull();
+      });
+    });
+
+    it("an edit whose old text isn't literally in the file may still apply: asks about a field it could touch", () => {
+      // OpenCode's edit tool matches loosely (whitespace, indentation).
+      const compact = '{"name":"app","exports":{".":"./a.js"}}';
+      expect(changed("edit", { filePath: "package.json", oldString: '"exports": { ".": "./a.js" }', newString: '"exports": { ".": "./b.js" }' }, on(compact))).toEqual(["package.json#exports"]);
+      expect(changed("edit", { filePath: "package.json", oldString: "no such text", newString: '"bin": "x.js"' }, on(pkg({})))).toEqual(["package.json#bin"]);
+      expect(changed("edit", { filePath: "package.json", oldString: "no such text", newString: "other" }, on(pkg({})))).toBeNull();
+    });
+
+    it("adding a file over an existing package.json compares with what is there", () => {
+      const was = pkg({ exports });
+      expect(changed("apply_patch", { changes: [{ path: "/ws/package.json", kind: { type: "add" }, diff: pkg({}) }] }, on(was))).toEqual(["package.json#exports"]);
+      const same = pkg({ exports }).split("\n").map((l) => `+${l}`).join("\n");
+      expect(changed("apply_patch", { patchText: `*** Begin Patch\n*** Add File: package.json\n${same}\n*** End Patch` }, on(was))).toBeNull();
+    });
+
+    it("ignores copies under node_modules, vendor and test folders", () => {
+      for (const path of ["node_modules/x/package.json", "vendor/x/package.json", "tests/fixtures/app/package.json"]) {
+        expect(changed("write", { filePath: path, content: pkg({ bin: "x.js" }) }, files({})), path).toBeNull();
+      }
+    });
+  });
+
+  it("is a separate detection from new dependencies", () => {
+    const both = JSON.stringify({ ...JSON.parse(PKG), bin: "x.js", dependencies: { ...JSON.parse(PKG).dependencies, zod: "^4" } });
+    expect(detect("write", { filePath: "package.json", content: both })?.kind).toBe("dependency");
+    expect(contract("write", { filePath: "package.json", content: both })).toMatchObject({ kind: "contract", ecosystem: "api", subjects: ["package.json#bin"] });
+    expect(detect("edit", edit("openapi.yaml"))).toBeNull();
+    expect(isContractFile("a.proto")).toBe(true);
   });
 });
 
