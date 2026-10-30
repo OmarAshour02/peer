@@ -609,7 +609,11 @@ const NEGATION = /n['’]t\b|\b(?:dont|not|no|never|without|avoid|instead|rather
 const OPEN_QUESTION = /\b(?:should|whether|which|or|why|what|how|is|are|does|do we|do i|can we|could we|shall we)\b/i;
 /** Any letter outside A-Z: the words may not be English, whose negations Peer would not recognize. */
 const NON_ENGLISH = /[^\P{L}A-Za-z]/u;
-const PASTED = /```|~~~|^\s*>|^(?: {4}|\t)\S/m;
+/**
+ * Pasted material: fenced code, a quoted line, or an indented line (four or more whitespace
+ * characters, or a tab, at the start of any line, whatever follows). `^` starts every line.
+ */
+const PASTED = /```|~~~|^[^\S\r\n\u2028\u2029]*>|^[^\S\r\n\u2028\u2029]{4}|^[^\S\r\n\u2028\u2029]*\t/m;
 /** Courtesy words that may open an imperative request. */
 const LEAD = /^(?:(?:please|also|then|and|now|just|so|ok|okay|yes|sure|actually|alright|go ahead and|can you|could you|would you|will you)\b[\s,]*)*/i;
 /** A request verb opening the sentence, then its direct object. "Replace X with Y" brings in Y. */

@@ -165,6 +165,23 @@ describe("TOML manifests are parsed, not pattern-matched (escalated F6)", () => 
     expect(parseToml(base + "leap = 2024-02-29\nn = -9223372036854775808\n")).not.toBeNull();
   });
 
+  it("a line-ending backslash trims only spaces, tabs and newlines (escalated F3)", () => {
+    const base = '[project]\ndependencies = ["httpx"]\n';
+    // Control characters after the continuation are not swallowed: the document is invalid, so Peer asks.
+    for (const after of ["\u000b", "\f", "\r"]) {
+      const src = `${base}description = """text\\\n${after}continued"""\n`;
+      expect(parseToml(src), JSON.stringify(after)).toBeNull();
+      expect(pip("httpx", { "pyproject.toml": src }), JSON.stringify(after)).toEqual(["httpx"]);
+    }
+    // Other Unicode whitespace is content, not TOML whitespace: it stays in the value.
+    const nbsp = parseToml('description = """text\\\n\u00a0continued"""\n');
+    expect(nbsp?.description).toBe("text\u00a0continued");
+    // Valid continuations still trim spaces, tabs, LF and CRLF.
+    expect(parseToml('d = """a \\\n \t\n  b"""\n')?.d).toBe("a b");
+    expect(parseToml('d = """a \\\r\n\r\n  b"""\r\n')?.d).toBe("a b");
+    expect(parseToml('d = """a\\ \t\n b"""\n')?.d).toBe("ab");
+  });
+
   it("accepts valid scalars, dotted keys and multi-line strings", () => {
     const src = 'title = "x"\nn = 1_000\nf = -3.5e2\nok = true\nwhen = 1979-05-27T07:32:00Z\nday = 1979-05-27\nx.y = 1\ntext = """\nline "one" ""\n"""\n[project]\ndependencies = ["httpx"]\n';
     expect(parseToml(src)).not.toBeNull();
