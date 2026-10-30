@@ -77,20 +77,22 @@ export interface CheckpointResolution {
 }
 
 /** Kinds of engineering decision Peer detects itself from tool calls, before they run. */
-export const DECISION_KINDS = ["dependency"] as const;
+export const DECISION_KINDS = ["dependency", "contract"] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
 /** A decision Peer detected in a tool call (not one the agent chose to ask about). */
 export interface DetectedDecision {
   kind: DecisionKind;
-  /** What is being decided, e.g. package names. */
+  /** What is being decided: package names, or contracts ("api/openapi.yaml", "package.json#exports"). */
   subjects: string[];
-  /** Package ecosystem or manifest, e.g. "npm", "pypi". */
+  /** Package ecosystem or manifest, e.g. "npm", "pypi"; "api" for a contract. */
   ecosystem: string;
   /** The tool action that carries the decision, as shown to the developer, e.g. "`npm install zod`". */
   action: string;
   /** "choice" asks the developer to pick; "reasoning" asks for their reasoning first (Learn). */
   style: "choice" | "reasoning";
+  /** The same call carries another decision: approving this one sends the agent back to retry, so Peer asks about the next. */
+  more?: boolean;
 }
 
 export interface Checkpoint {

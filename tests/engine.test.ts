@@ -7,7 +7,7 @@ import { RuntimeSet } from "../src/server/runtime/set.js";
 import { PeerService } from "../src/server/service.js";
 import { Store } from "../src/server/store.js";
 import type { PeerEvent, PeerSession } from "../src/shared/types.js";
-import { CONTINUATION_TEXT, DECISION_APPROVE, DECISION_DECLINE } from "../src/server/collaboration/engine.js";
+import { CONTINUATION_TEXT, CONTRACT_APPROVE, CONTRACT_DECLINE, DECISION_APPROVE, DECISION_DECLINE } from "../src/server/collaboration/engine.js";
 import { FakeRuntime } from "./helpers.js";
 
 let dir: string;
@@ -732,5 +732,231 @@ describe("decisions Peer detects itself (new dependencies)", () => {
       const said = runtime.lastPrompt().input.system.includes("Peer itself pauses some actions before they run");
       expect(said).toBe(mode !== "focus");
     }
+  });
+});
+
+describe("decisions Peer detects itself (public API changes)", () => {
+  beforeEach(() => writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "app", dependencies: { react: "^19.0.0" } })));
+
+  const tick = () => new Promise((r) => setImmediate(r));
+  const editSpec = (s: PeerSession, file = "openapi.yaml", signal?: AbortSignal) => engine().checkTool(s.runtimeSessionId, "edit", { filePath: file, oldString: "a", newString: "b" }, signal);
+  const pending = (s: PeerSession) => store.listCheckpoints(s.id).filter((c) => c.status === "pending");
+  async function held(s: PeerSession, file = "openapi.yaml") {
+    const call = editSpec(s, file);
+    await tick();
+    const [cp] = pending(s);
+    expect(cp).toBeDefined();
+    return { call, cp: cp! };
+  }
+  /** The current turn ends and the developer sends a new message. */
+  async function nextTask(s: PeerSession) {
+    idle(s);
+    await service.send(s.id, "next task");
+  }
+
+  it("Collaborate holds the edit and asks; approving runs it, without asking again in the task", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "add a delete endpoint");
+    const { call, cp } = await held(s);
+    expect(cp).toMatchObject({ source: "peer", category: "architecture", question: "Change the public API: `openapi.yaml`?", decision: { kind: "contract", subjects: ["openapi.yaml"], ecosystem: "api", style: "choice", action: "an edit to `openapi.yaml`" } });
+    expect(cp.options.map((o) => o.label)).toEqual([CONTRACT_APPROVE, CONTRACT_DECLINE]);
+    expect((await write(s)).allow).toBe(false);
+
+    await engine().resolveCheckpoint(cp.id, { action: "choose", option: CONTRACT_APPROVE });
+    expect(await call).toEqual({ allow: true });
+    expect(await editSpec(s)).toEqual({ allow: true });
+    expect(store.listCheckpoints(s.id)).toHaveLength(1);
+  });
+
+  it("asks per file: approving one contract is not approving another", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const first = await held(s);
+    await engine().resolveCheckpoint(first.cp.id, { action: "choose", option: CONTRACT_APPROVE });
+    await first.call;
+    const second = await held(s, "api.proto");
+    expect(second.cp.decision!.subjects).toEqual(["api.proto"]);
+    await engine().resolveCheckpoint(second.cp.id, { action: "choose", option: CONTRACT_APPROVE });
+    await second.call;
+  });
+
+  it("an approval lasts for the task, including its continuation, not for later tasks", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { call, cp } = await held(s);
+    await engine().resolveCheckpoint(cp.id, { action: "choose", option: CONTRACT_APPROVE });
+    await call;
+    await nextTask(s);
+    const again = await held(s);
+    expect(again.cp.id).not.toBe(cp.id);
+    await engine().resolveCheckpoint(again.cp.id, { action: "choose", option: CONTRACT_APPROVE });
+    await again.call;
+  });
+
+  it("'Don't change it' rejects the call and retries in the task; a new message asks again", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { call, cp } = await held(s);
+    await engine().resolveCheckpoint(cp.id, { action: "choose", option: CONTRACT_DECLINE, text: "keep v1 stable" });
+    const decision = await call;
+    expect(decision.allow === false && decision.reason).toMatch(/decided against it and said: "keep v1 stable".*Continue without changing it.*in this task/);
+    const retry = await editSpec(s);
+    expect(retry).toMatchObject({ allow: false, explain: true });
+    expect(retry.allow === false && retry.reason).toMatch(/not to change `openapi.yaml` in this task/);
+    expect(store.listCheckpoints(s.id)).toHaveLength(1);
+    await nextTask(s);
+    const again = await held(s);
+    await engine().resolveCheckpoint(again.cp.id, { action: "choose", option: CONTRACT_APPROVE });
+    expect(await again.call).toEqual({ allow: true });
+  });
+
+  it("the developer's words are not read as approval, even an explicit request", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "Use `openapi.yaml`");
+    const { call, cp } = await held(s);
+    await engine().resolveCheckpoint(cp.id, { action: "choose", option: CONTRACT_APPROVE });
+    await call;
+  });
+
+  it("a free-text answer reaches the agent first; its retry runs", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { call, cp } = await held(s);
+    await engine().resolveCheckpoint(cp.id, { action: "answer", text: "only if it stays backwards compatible" });
+    const decision = await call;
+    expect(decision.allow === false && decision.reason).toMatch(/They said: "only if it stays backwards compatible".*changing `openapi.yaml`/);
+    expect(await editSpec(s)).toEqual({ allow: true });
+  });
+
+  it("Learn asks for reasoning first, and the agent must respond to it", async () => {
+    const s = await newSession("learn");
+    await service.send(s.id, "task");
+    await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "routine", question: "Copying an existing pattern" });
+    const { call, cp } = await held(s);
+    expect(cp).toMatchObject({ category: "hypothesis", options: [], decision: { kind: "contract", style: "reasoning" } });
+    expect(cp.question).toBe("Before the agent changes `openapi.yaml`: why do you think this task needs the public API to change, and what could the change break?");
+    await engine().resolveCheckpoint(cp.id, { action: "answer", text: "clients need delete" });
+    const decision = await call;
+    expect(decision.allow === false && decision.reason).toMatch(/Their reasoning: "clients need delete"/);
+    expect(await editSpec(s)).toEqual({ allow: true });
+  });
+
+  it("Focus and 'Just do it' note the change without interrupting", async () => {
+    const focus = await newSession("focus");
+    await service.send(focus.id, "task");
+    expect(await editSpec(focus)).toEqual({ allow: true });
+    expect(store.listCheckpoints(focus.id)[0]).toMatchObject({ status: "auto_resolved", question: "Public API change: `openapi.yaml`", decision: { kind: "contract" } });
+
+    const s = await newSession("collaborate");
+    await service.send(s.id, "/go task");
+    expect(await editSpec(s)).toEqual({ allow: true });
+    expect(store.listCheckpoints(s.id)[0]).toMatchObject({ status: "auto_resolved", decision: { kind: "contract" } });
+  });
+
+  it("a hint or discussion keeps the call from running, with contract wording", async () => {
+    const s = await newSession("learn");
+    await service.send(s.id, "task");
+    await engine().requestCheckpoint(s.runtimeSessionId, null, { category: "routine", question: "Copying an existing pattern" });
+    const { call, cp } = await held(s);
+    await engine().resolveCheckpoint(cp.id, { action: "hint" });
+    const decision = await call;
+    expect(decision.allow === false && decision.reason).toMatch(/whether `openapi.yaml` needs to change here/);
+    // Peer asks again on the retry.
+    await held(s);
+  });
+
+  it("one call with a new dependency and a contract change asks about both, one at a time", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const content = JSON.stringify({ name: "app", bin: "cli.js", dependencies: { react: "^19.0.0", zod: "^4" } });
+    const run = () => engine().checkTool(s.runtimeSessionId, "write", { filePath: "package.json", content });
+
+    const first = run();
+    await tick();
+    const [dep] = pending(s);
+    expect(dep!.decision).toMatchObject({ kind: "dependency", subjects: ["zod"], more: true });
+    await engine().resolveCheckpoint(dep!.id, { action: "choose", option: DECISION_APPROVE });
+    // Approving the dependency must not carry the contract change past the developer.
+    const decided = await first;
+    expect(decided.allow === false && decided.reason).toMatch(/another decision Peer has to ask about\. Run it again/);
+
+    const second = run();
+    await tick();
+    const [api] = pending(s);
+    expect(api!.decision).toMatchObject({ kind: "contract", subjects: ["package.json#bin"] });
+    expect(api!.decision!.more).toBeUndefined();
+    await engine().resolveCheckpoint(api!.id, { action: "choose", option: CONTRACT_APPROVE });
+    expect(await second).toEqual({ allow: true });
+    expect(await run()).toEqual({ allow: true });
+  });
+
+  it("declining the dependency in such a call stops it before the contract question", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const content = JSON.stringify({ name: "app", bin: "cli.js", dependencies: { react: "^19.0.0", zod: "^4" } });
+    const call = engine().checkTool(s.runtimeSessionId, "write", { filePath: "package.json", content });
+    await tick();
+    await engine().resolveCheckpoint(pending(s)[0]!.id, { action: "choose", option: DECISION_DECLINE });
+    expect((await call).allow).toBe(false);
+    expect(store.listCheckpoints(s.id).filter((c) => c.decision?.kind === "contract")).toHaveLength(0);
+  });
+
+  it("decisions don't cross kinds, even with the same subject", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const install = engine().checkTool(s.runtimeSessionId, "bash", { command: "npm install api.proto" });
+    await tick();
+    await engine().resolveCheckpoint(pending(s)[0]!.id, { action: "choose", option: DECISION_DECLINE });
+    await install;
+    const { call, cp } = await held(s, "api.proto");
+    expect(cp.decision!.kind).toBe("contract");
+    await engine().resolveCheckpoint(cp.id, { action: "choose", option: CONTRACT_APPROVE });
+    expect(await call).toEqual({ allow: true });
+    const again = await engine().checkTool(s.runtimeSessionId, "bash", { command: "npm install api.proto" });
+    expect(again.allow).toBe(false);
+  });
+
+  it("Stop cancels the held call: it does not run", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { call, cp } = await held(s);
+    await engine().abort(s.id);
+    const decision = await call;
+    expect(decision.allow === false && decision.reason).toMatch(/question was cancelled/);
+    expect(store.getCheckpoint(cp.id)!.status).toBe("cancelled");
+  });
+
+  it("survives a restart: answering resumes the same task with the decision recorded", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    const { cp } = await held(s);
+
+    const runtime2 = new FakeRuntime();
+    const service2 = new PeerService(store, new RuntimeSet([runtime2]), new EventHub());
+    expect(store.getCheckpoint(cp.id)!.status).toBe("interrupted");
+    await service2.engine.resolveCheckpoint(cp.id, { action: "choose", option: CONTRACT_APPROVE });
+    const resumed = runtime2.lastPrompt().input.text;
+    expect(resumed).toContain("Before an edit to `openapi.yaml` ran, Peer paused it");
+    expect(resumed).toContain("about changing `openapi.yaml`, and they approved");
+    expect(await service2.engine.checkTool(s.runtimeSessionId, "edit", { filePath: "openapi.yaml", oldString: "a", newString: "b" })).toEqual({ allow: true });
+  });
+
+  it("tells the agent about it, and what earlier decisions meant", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    expect(runtime.lastPrompt().input.system).toContain("changing a public API contract");
+    const { call, cp } = await held(s);
+    await engine().resolveCheckpoint(cp.id, { action: "choose", option: CONTRACT_DECLINE });
+    await call;
+    await nextTask(s);
+    expect(runtime.lastPrompt().input.system).toContain("Changing `openapi.yaml`: declined for that task only; Peer asks again in a new task.");
+  });
+
+  it("does not hold ordinary edits", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "task");
+    expect(await editSpec(s, "src/queries/notes.graphql")).toEqual({ allow: true });
+    expect(await editSpec(s, "tests/fixtures/openapi.yaml")).toEqual({ allow: true });
+    expect(store.listCheckpoints(s.id)).toHaveLength(0);
   });
 });
