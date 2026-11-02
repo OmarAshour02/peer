@@ -166,6 +166,51 @@ describe("two modes: Collaborate (default) and Learn", () => {
   });
 });
 
+describe("question quality in Learn", () => {
+  it("a go-ahead on a confirm checkpoint does not unlock code changes; engaging does", async () => {
+    const s = await newSession("learn");
+    await service.send(s.id, "Add ETag support");
+    expect((await write(s)).allow).toBe(false);
+    const plan = await ask(s, "confirm", "Implement ETag support with strong ETags now?", { options: [{ label: "Go ahead" }], recommendation: "Go ahead" });
+    expect(plan.checkpoint!.status).toBe("pending");
+    const resolved = await resolve(plan.checkpoint!.id, "choose", { option: "Go ahead" });
+    expect(engine().agentOutput(resolved)).toMatch(/stay locked: in Learn mode a go-ahead on a plan does not count as engaging/);
+    expect(engine().gateFor(s.id)).toMatchObject({ kind: "engage", locked: true });
+    expect((await write(s)).allow).toBe(false);
+    // The developer approving the plan still counts as their decision about it.
+    const q = await ask(s, "hypothesis", "What should the ETag be based on?");
+    await resolve(q.checkpoint!.id, "answer", { text: "A hash of the list" });
+    expect((await write(s)).allow).toBe(true);
+  });
+
+  it("a free-text yes on a confirm checkpoint does not unlock either", async () => {
+    const s = await newSession("learn");
+    await service.send(s.id, "Add ETag support");
+    const plan = await ask(s, "confirm", "Implement ETag support now?");
+    await resolve(plan.checkpoint!.id, "answer", { text: "Yes, go ahead" });
+    expect((await write(s)).allow).toBe(false);
+  });
+
+  it("explicit controls on a confirm checkpoint still unlock: You decide and Direct answer", async () => {
+    for (const action of ["delegate", "direct"] as const) {
+      const s = await newSession("learn");
+      await service.send(s.id, "Add ETag support");
+      const plan = await ask(s, "confirm", "Implement ETag support now?");
+      await resolve(plan.checkpoint!.id, action);
+      expect((await write(s)).allow, action).toBe(true);
+    }
+  });
+
+  it("Collaborate is unchanged: a confirm checkpoint is an ordinary question", async () => {
+    const s = await newSession("collaborate");
+    await service.send(s.id, "Add ETag support");
+    const plan = await ask(s, "confirm", "Implement ETag support now?", { options: [{ label: "Go ahead" }] });
+    expect(plan.checkpoint!.status).toBe("pending");
+    await resolve(plan.checkpoint!.id, "choose", { option: "Go ahead" });
+    expect((await write(s)).allow).toBe(true);
+  });
+});
+
 describe("adaptive involvement, not question quotas", () => {
   it("tells the agent to weigh each decision, with a ceiling that is not a target", async () => {
     const s = await newSession("collaborate");
@@ -929,6 +974,41 @@ describe("session persistence", () => {
         }
       });
     }
+  }
+
+  it("answering an interrupted confirm question in Learn resumes locked until the developer engages", async () => {
+    const reopen = fileSetup();
+    const s = await newSession("learn");
+    await service.send(s.id, "Add ETag support");
+    const q = await ask(s, "confirm", "Implement ETag support now?", { options: [{ label: "Go ahead" }] });
+    reopen();
+    expect(store.getCheckpoint(q.checkpoint!.id)!.status).toBe("interrupted");
+    await resolve(q.checkpoint!.id, "choose", { option: "Go ahead" });
+    expect(turn(s).gate).toBe("engage");
+    expect((await write(s)).allow).toBe(false);
+    const engaging = await ask(s, "hypothesis", "What should the ETag be based on?");
+    await resolve(engaging.checkpoint!.id, "answer", { text: "A hash of the list" });
+    expect((await write(s)).allow).toBe(true);
+  });
+
+  for (const unlock of ["hypothesis", "routine", "delegate"] as const) {
+    it(`answering an interrupted confirm in Learn preserves engagement already earned by ${unlock}`, async () => {
+      const reopen = fileSetup();
+      const s = await newSession("learn");
+      await service.send(s.id, "Add ETag support");
+      if (unlock === "routine") {
+        await ask(s, "routine", "Mechanical rename only");
+      } else {
+        const q = await ask(s, "hypothesis", "What should the ETag be based on?");
+        await resolve(q.checkpoint!.id, unlock === "delegate" ? "delegate" : "answer", unlock === "delegate" ? {} : { text: "A hash of the list" });
+      }
+      expect((await write(s)).allow).toBe(true);
+      const plan = await ask(s, "confirm", "Implement ETag support now?", { options: [{ label: "Go ahead" }] });
+      reopen();
+      expect(store.getCheckpoint(plan.checkpoint!.id)!.status).toBe("interrupted");
+      await resolve(plan.checkpoint!.id, "choose", { option: "Go ahead" });
+      expect((await write(s)).allow, unlock).toBe(true);
+    });
   }
 
   it("repeated recovery keeps earlier answers in the same task", async () => {

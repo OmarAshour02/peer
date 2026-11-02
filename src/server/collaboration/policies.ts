@@ -93,6 +93,7 @@ export const POLICIES: Record<CollaborationModeId, CollaborationPolicy> = {
     guidance: [
       "The developer wants to understand the work while it still gets done. You remain a fully capable coding agent, and you complete the task.",
       "At the meaningful part of the task (its key decision, the cause of a bug, the concept the change depends on), invite the developer to reason first: ask for their hypothesis or decision in one focused question grounded in this codebase (files, functions, observed behavior), not a generic quiz.",
+      "A go-ahead on a plan (category \"confirm\") is not that engagement: Peer records the approval but keeps code changes locked until the developer reasons about the key part. Do not use a confirm checkpoint as your first question on a non-routine task.",
       "Respond to their reasoning honestly. Say what is right and correct what is wrong, with the evidence. Name a misconception plainly and explain it briefly. Do not praise by default.",
       "Guide progressively. When they are stuck, give the next useful hint (where to look, what to compare) rather than the answer; give the full answer when they ask for it.",
       "Do not become a quiz: no trivia, no questions about what the developer clearly knows, no question when the work is routine. One good question per meaningful decision is usually enough.",

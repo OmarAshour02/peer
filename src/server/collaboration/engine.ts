@@ -321,13 +321,15 @@ export class CollaborationEngine {
     isResume: boolean,
     continuedFrom: string | null = null,
     extra: Pick<PolicyContext, "continuingDiscussion"> = {},
+    awaitingEngagementOverride?: boolean,
   ): Promise<Turn> {
     this.finishActiveTurn(session.id);
     const previous = this.store.latestTurn(session.id);
     const isContinuation = continuedFrom !== null;
     // A developer reply after a gated turn in which they did not engage is the engagement. A
-    // continuation carries on work the developer already engaged with.
-    const awaitingEngagement = isResume || isContinuation || (previous !== null && isLocked(previous));
+    // continuation carries on work the developer already engaged with. A resumed Learn task whose
+    // only engagement was a go-ahead on a confirm checkpoint overrides this: it resumes locked.
+    const awaitingEngagement = awaitingEngagementOverride ?? (isResume || isContinuation || (previous !== null && isLocked(previous)));
     const context: PolicyContext = { ...extra, hintLevel: intent === "hint" ? this.hintsInARow(session.id) + 1 : undefined, handsOff: this.handsOff(session.id) };
     let plan = resolveEffectivePolicy(session.mode, intent, awaitingEngagement, context);
     // Same task, same budget: the continuation is told what is left of it.
@@ -793,7 +795,7 @@ export class CollaborationEngine {
     const turn = cp.turnId ? this.store.getTurn(cp.turnId) : null;
     // A hint on a Peer-held dependency call only denies that call and asks again on retry.
     // Agent questions use the task-wide hint hold; keep the dependency reasoning loop intact.
-    if (wasLive && turn) this.applyControl(turn, input.action, cp.decision !== null);
+    if (wasLive && turn) this.applyControl(turn, input.action, cp.decision !== null, cp.category);
     else this.applyDiscussion(cp.sessionId, input.action);
     this.store.logEvent(cp.sessionId, "checkpoint.resolved", {
       checkpointId: id,
@@ -820,7 +822,14 @@ export class CollaborationEngine {
         const inherited = session.discussing ? "discuss"
           : turn?.mode === session.mode && !this.modeChangedSince(turn) && (turn.intent === "delegate" || turn.intent === "answer" || (turn.intent === "hint" && isLocked(turn))) ? turn.intent
           : "default";
-        await this.startTurn(session, resumeText, RESUME_INTENT[input.action] ?? inherited, true, turn?.id ?? null);
+        // A go-ahead on a confirm checkpoint in Learn is not engagement, live or resumed. Only
+        // when the task is still awaiting engagement: engagement already earned in it (an answer,
+        // routine work, You decide) survives the restart.
+        const confirmResumeLocked =
+          session.mode === "learn" && cp.source === "agent" && cp.category === "confirm" && (input.action === "answer" || input.action === "choose") && !RESUME_INTENT[input.action] && inherited === "default" && !session.discussing && turn !== null && isLocked(turn)
+            ? false
+            : undefined;
+        await this.startTurn(session, resumeText, RESUME_INTENT[input.action] ?? inherited, true, turn?.id ?? null, {}, confirmResumeLocked);
       } catch (err) {
         this.emit({ type: "checkpoint.updated", checkpoint: this.store.updateCheckpoint(id, "interrupted", null) });
         throw err;
@@ -835,8 +844,8 @@ export class CollaborationEngine {
    * "Direct answer" change the turn's intent (so later questions are declined accordingly); "Discuss
    * first" or a hint locks code changes again until the developer proceeds; Proceed retires them.
    */
-  private applyControl(turn: Turn, action: CheckpointAction, heldDependency = false) {
-    if (engages(turn, action)) this.store.markTurnEngaged(turn.id);
+  private applyControl(turn: Turn, action: CheckpointAction, heldDependency = false, category?: CheckpointCategory) {
+    if (engages(turn, action, category)) this.store.markTurnEngaged(turn.id);
     if (action === "skip" && (turn.intent === "discuss" || turn.intent === "hint")) this.store.setTurnIntent(turn.id, "proceed");
     if (action === "go") this.store.setTurnIntent(turn.id, "delegate");
     if (action === "direct") this.store.setTurnIntent(turn.id, "answer");
@@ -906,6 +915,11 @@ export class CollaborationEngine {
           : " Code changes are now unlocked."
         : "";
     const added = r?.text ? ` and added: "${r.text}"` : "";
+    // A go-ahead on a plan in Learn approves the plan but is not the engagement that unlocks.
+    const confirmHeld =
+      !cp.decision && cp.category === "confirm" && turn?.mode === "learn" && turn !== null && isLocked(turn) && (r?.action === "answer" || r?.action === "choose")
+        ? ` Code changes stay locked: in Learn mode a go-ahead on a plan does not count as engaging with the task. Ask the developer a hypothesis or concept question about the key part of this task with ${session ? this.checkpointToolFor(session) : "the checkpoint tool"} before changing code.`
+        : "";
     if (!r) return "The checkpoint has no response yet.";
     if (cp.decision) {
       const decision = heldCallDecision(cp, this.hintNumber(cp));
@@ -936,9 +950,9 @@ export class CollaborationEngine {
         return `Peer did not ask the developer: ${r.note}. Decide yourself${rec}, mention the decision and why in your final summary, and continue.`;
       }
       case "answer":
-        return `The developer answered: "${r.text}". Take this into account and continue.${unlocked}`;
+        return `The developer answered: "${r.text}". Take this into account and continue.${unlocked}${confirmHeld}`;
       case "choose":
-        return `The developer chose "${r.option}"${added}. Proceed with it.${unlocked}`;
+        return `The developer chose "${r.option}"${added}. Proceed with it.${unlocked}${confirmHeld}`;
       case "delegate":
         return `The developer delegated this decision to you${added}. Make the call yourself${rec}, state your choice in one sentence, and continue.${unlocked}`;
       case "skip":
@@ -1264,10 +1278,14 @@ function isLocked(turn: Turn): boolean {
 /**
  * Whether a response releases the turn's lock. Learn's "engage" lock opens on any engagement but a
  * hint or a wish to discuss; a "hold" (Discuss first, Hint) opens only when the developer proceeds.
+ * In Learn, an ordinary answer to a "confirm" checkpoint (a go-ahead on a plan) is not engagement:
+ * it approves the plan but does not unlock. Explicit controls on that checkpoint (You decide,
+ * Just do it, Direct answer, Proceed) still unlock, as they do on any checkpoint.
  */
-function engages(turn: Turn, action: CheckpointAction): boolean {
+function engages(turn: Turn, action: CheckpointAction, category?: CheckpointCategory): boolean {
   switch (lockKind(turn)) {
     case "engage":
+      if (turn.mode === "learn" && category === "confirm" && (action === "answer" || action === "choose")) return false;
       return action !== "hint" && action !== "discuss";
     case "hold":
       return action === "skip" || action === "go" || action === "direct";

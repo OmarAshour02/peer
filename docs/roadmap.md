@@ -46,7 +46,7 @@
 ## Next: Milestone 4, collaboration quality
 
 1. **Question quality in Learn.** The gate guarantees engagement, not a good question. Ideas:
-   - Make a "confirm" checkpoint insufficient to open an `engage` gate for non-mechanical tasks.
+   - Done: a "confirm" checkpoint no longer opens an `engage` gate in Learn. An ordinary answer or choice on it approves the plan but keeps code changes locked (live and on a resumed turn); explicit controls on it (You decide, Just do it, Direct answer, Proceed) still unlock, and routine work keeps its own path. The agent is told to ask a hypothesis or concept question instead.
    - Classify tasks with a cheap model call.
    - Track how often each kind of checkpoint is answered versus skipped.
 2. **Collaborate approach gate.** An optional "agree before significant edits" gate for Collaborate, triggered by a diff-size or file-count threshold instead of always being on.

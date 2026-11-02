@@ -90,7 +90,7 @@ Peer is explicit about this distinction.
 **Enforced by Peer** (application state plus runtime hooks; the agent cannot bypass these):
 - A checkpoint the agent opens **blocks the agent** until the developer responds. Checkpoints are stored, so they survive UI reconnects. If Peer or the runtime restarts, an open checkpoint becomes *interrupted*, and answering it resumes the work in the same conversation.
 - While a checkpoint is open, **code changes are locked** in every mode.
-- In **Learn**, code changes (edits and any non-read-only shell command) are **locked at the start of each new task** until the developer engages: answering or choosing in a checkpoint, **You decide**, **Just do it**, **Direct answer**, or simply replying. A hint or a wish to discuss doesn't unlock. The agent can also unlock it by declaring the work routine (see above). Reading and exploring the code stays allowed.
+- In **Learn**, code changes (edits and any non-read-only shell command) are **locked at the start of each new task** until the developer engages: answering or choosing in a checkpoint, **You decide**, **Just do it**, **Direct answer**, or simply replying. One exception: answering or choosing on a **confirm** checkpoint (a go-ahead on a plan) approves the plan but does not unlock, live or on a resumed turn; the explicit controls on it (**You decide**, **Just do it**, **Direct answer**, Proceed) still do. A hint or a wish to discuss doesn't unlock. The agent can also unlock it by declaring the work routine (see above). Reading and exploring the code stays allowed.
 - **Discuss first** locks code changes until the developer proceeds, across follow-up messages; on a question mid-turn it locks them again for the rest of the turn. **Give me a hint** locks them for its turn.
 - **The controls' scope**: **Just do it** and **Direct answer** change the rules for the rest of the task (including a Codex continuation); the session's mode never changes.
 - **Which questions reach the developer** is decided by policy: per-mode categories, a per-turn ceiling, the controls in effect, the developer's recent responses in this session, and repeats of answered questions. Declined questions are recorded and shown in the transcript.
@@ -117,7 +117,7 @@ Known gaps:
 
 **Guidance** (per-turn instructions the agent receives; good models follow them, but nothing forces them):
 - Whether Collaborate actually proposes an approach before a significant change (the gate is open in Collaborate), and whether it challenges a wrong assumption.
-- The quality of questions. The Learn gate guarantees the developer engages before code changes; it cannot force the agent to ask a *good* question. In testing, the agent sometimes used a one-click "go-ahead" checkpoint where a hypothesis question would have taught more.
+- The quality of questions. The Learn gate guarantees the developer engages before code changes; it cannot force the agent to ask a *good* question. A one-click "go-ahead" checkpoint no longer opens the gate (see above), but whether the agent then asks a hypothesis question that teaches something is still its judgment.
 - **Routine work in Learn** is the agent's judgment. Peer shows it, and limits what it can unlock, but can't tell whether a task really is mechanical.
 - What the agent does with a control's instruction: how good a hint is, how direct an answer is, how much it explores while discussing.
 - Tone, depth of explanation, and how hints are phrased.

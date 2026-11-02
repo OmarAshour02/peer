@@ -36,6 +36,7 @@ export type CheckpointCategory = (typeof CHECKPOINT_CATEGORIES)[number];
  * How code changes are gated during a turn.
  * - open: the agent may change code.
  * - engage: code changes are locked until the developer engages (answers a checkpoint, delegates, skips).
+ *   In Learn, a go-ahead on a "confirm" checkpoint approves the plan but is not engagement.
  * - hold: code changes are locked for the whole turn unless the developer explicitly delegates or skips.
  */
 export type GateKind = "open" | "engage" | "hold";
