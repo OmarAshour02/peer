@@ -101,7 +101,7 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
     <div className={`my-3 rounded-lg border ${open ? "border-accent/60 bg-accent/5" : "border-line bg-raised/40"} px-4 py-3`}>
       <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wider">
         <span className={open ? "text-accent" : "text-faint"}>{peer ? "Peer paused the agent" : CATEGORY_UI[cp.category]}</span>
-        {peer && <span className="text-faint">· new dependency</span>}
+        {peer && <span className="text-faint">· {cp.decision?.kind === "contract" ? "public API change" : cp.decision?.kind === "approach" ? "large change" : "new dependency"}</span>}
         {cp.status === "pending" && <span className="text-faint">· the agent is waiting for you</span>}
         {cp.status === "interrupted" && <span className="text-warn">· the run ended before you answered; answering resumes it</span>}
         {cp.status === "cancelled" && <span className="text-faint">· cancelled</span>}

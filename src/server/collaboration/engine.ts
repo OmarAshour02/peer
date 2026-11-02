@@ -19,12 +19,12 @@ import {
   type UndoAvailability,
   type UndoResult,
 } from "../../shared/types.js";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import type { RuntimeEvent } from "../runtime/adapter.js";
 import { changedFiles, restoreFiles, snapshotWorkspace } from "../runtime/git-snapshot.js";
 import type { RuntimeSet } from "../runtime/set.js";
 import type { Store } from "../store.js";
-import { detectContractChange, detectDecision, namesApproved, type Detection } from "./decisions.js";
+import { detectContractChange, detectDecision, editTargetPaths, namesApproved, type Detection } from "./decisions.js";
 import { isGoAhead, parseIntent } from "./intent.js";
 import { INTENT_LABELS, getPolicy, resolveEffectivePolicy, type PolicyContext } from "./policies.js";
 import { composeSystemPrompt } from "./prompt.js";
@@ -62,6 +62,10 @@ export const DECISION_APPROVE = "Add it";
 export const DECISION_DECLINE = "Don't add it";
 export const CONTRACT_APPROVE = "Change it";
 export const CONTRACT_DECLINE = "Don't change it";
+export const APPROACH_APPROVE = "Continue with the changes";
+export const APPROACH_DECLINE = "Stop here";
+/** Distinct files a Collaborate task may edit before the approach gate asks the developer to agree. */
+export const APPROACH_GATE_FILE_THRESHOLD = 5;
 
 export type SendResult =
   | { kind: "turn-started"; turn: Turn }
@@ -366,6 +370,7 @@ export class CollaborationEngine {
       const system = composeSystemPrompt(plan, runtime.checkpointTool, {
         decided: this.decidedSoFar(session.id),
         previousTurnLocked: previous !== null && (previous.gate !== "open" || previous.relockedAt !== null),
+        approachGateThreshold: session.approachGate && session.mode === "collaborate" ? APPROACH_GATE_FILE_THRESHOLD : undefined,
       });
       await runtime.prompt(directory, session.runtimeSessionId, {
         text,
@@ -453,7 +458,11 @@ export class CollaborationEngine {
     // Peer owns its runtime: a session it cannot map (e.g. deleted mid-run) gets no write access.
     if (!session) return { allow: false, reason: `Peer collaboration gate: "${tool}" was not run because this session is not an active Peer session.` };
     const gate = this.gateFor(session.id);
-    if (!gate.locked) return this.checkDecision(session, tool, args);
+    if (!gate.locked) {
+      const decision = this.checkDecision(session, tool, args, this.approachPending(session, tool, args));
+      if ("wait" in decision || !decision.allow) return decision;
+      return this.checkApproach(session, tool, args);
+    }
 
     this.store.logEvent(session.id, "gate.blocked", { tool, reason: gate.reason });
     const active = this.activeTurn(session.id);
@@ -518,7 +527,7 @@ export class CollaborationEngine {
    * the developer already made are applied without asking again. A call that carries several asks
    * about one at a time: the agent retries after each approval.
    */
-  private checkDecision(session: PeerSession, tool: string, args: unknown): ToolCheck {
+  private checkDecision(session: PeerSession, tool: string, args: unknown, approachPending = false): ToolCheck {
     const detected: Detection[] = [];
     for (const detect of [detectDecision, detectContractChange]) {
       try {
@@ -531,10 +540,110 @@ export class CollaborationEngine {
       }
     }
     for (const [i, found] of detected.entries()) {
-      const check = this.checkDetected(session, tool, found, i < detected.length - 1);
+      // A held decision whose call also has files to account for approves into a retry, so the
+      // retry passes the (now decided) check and reaches the approach gate's counting.
+      const check = this.checkDetected(session, tool, found, i < detected.length - 1 || approachPending);
       if ("wait" in check || !check.allow) return check;
     }
     return { allow: true };
+  }
+
+  /** Whether the approach gate is in play for this call and has not already been agreed in this task. */
+  private approachPending(session: PeerSession, tool: string, args: unknown): boolean {
+    const turn = this.activeTurn(session.id);
+    if (!turn || !this.approachActive(session, turn)) return false;
+    if (editTargetPaths(tool, args, this.directoryOf(session)).length === 0) return false;
+    return this.approachState(session.id, new Set(this.taskTurnIds(turn.id))) !== "agreed";
+  }
+
+  /** Whether the approach gate applies to this turn at all (Collaborate, opted in, ordinary task). */
+  private approachActive(session: PeerSession, turn: Turn): boolean {
+    return turn.mode === "collaborate" && session.approachGate && turn.intent === "default";
+  }
+
+  /**
+   * Collaborate approach gate (per-session opt-in): count the distinct files this task's
+   * edit/write/patch calls target, from their arguments, before they run. The call that would
+   * pass the threshold is held on a Peer checkpoint; agreement (or a stop) then applies to the
+   * rest of the task. Shell-driven changes name no files Peer can see and are not counted.
+   */
+  private checkApproach(session: PeerSession, tool: string, args: unknown): ToolCheck {
+    const directory = this.directoryOf(session);
+    const paths = editTargetPaths(tool, args, directory);
+    if (paths.length === 0) return { allow: true };
+    const turn = this.activeTurn(session.id);
+    const record = () => {
+      if (turn) this.store.logEvent(session.id, "tool.edit_files", { turnId: turn.id, paths });
+    };
+    if (!turn || !this.approachActive(session, turn)) {
+      record();
+      return { allow: true };
+    }
+    const task = new Set(this.taskTurnIds(turn.id));
+    const state = this.approachState(session.id, task);
+    if (state === "agreed") {
+      record();
+      return { allow: true };
+    }
+    if (state === "declined") {
+      return {
+        allow: false,
+        explain: true,
+        reason: `Peer collaboration: the developer stopped this task's changes at ${APPROACH_GATE_FILE_THRESHOLD} files and did not agree to continue, so "${tool}" was not run. Continue without further edits in this task, and summarize what is done; the developer can ask for more changes in their next message.`,
+      };
+    }
+    const seen = new Set<string>();
+    for (const e of this.store.listEvents(session.id)) {
+      if (e.type !== "tool.edit_files" || typeof e.payload.turnId !== "string" || !task.has(e.payload.turnId) || !Array.isArray(e.payload.paths)) continue;
+      for (const p of e.payload.paths) if (typeof p === "string") seen.add(p);
+    }
+    const wouldBe = new Set([...seen, ...paths]);
+    if (wouldBe.size <= APPROACH_GATE_FILE_THRESHOLD) {
+      record();
+      return { allow: true };
+    }
+    // An earlier approach question about this task that lost its run is replaced by this one.
+    for (const old of this.store.listCheckpoints(session.id)) {
+      if (old.status === "interrupted" && old.decision?.kind === "approach" && old.turnId !== null && task.has(old.turnId)) {
+        const cancelled = this.store.updateCheckpoint(old.id, "cancelled", { action: "cancelled", by: "system", note: "Asked again when the agent retried" });
+        this.emit({ type: "checkpoint.updated", checkpoint: cancelled });
+      }
+    }
+    const files = [...wouldBe].map((p) => relative(directory, p) || p).sort();
+    const decision: DetectedDecision = {
+      kind: "approach",
+      subjects: files.slice(0, 20),
+      ecosystem: "workspace",
+      action: `an edit to ${paths.map((p) => `\`${relative(directory, p) || p}\``).join(", ")}`,
+      style: "choice",
+    };
+    const checkpoint = this.store.createCheckpoint({
+      sessionId: session.id,
+      turnId: turn.id,
+      runtimeCallId: null,
+      source: "peer",
+      decision,
+      ...approachQuestion(files),
+      recommendation: null,
+      status: "pending",
+      resolution: null,
+    });
+    this.live.add(checkpoint.id);
+    this.store.logEvent(session.id, "checkpoint.opened", { checkpointId: checkpoint.id, category: checkpoint.category, question: checkpoint.question, source: "peer", tool });
+    this.emit({ type: "checkpoint.updated", checkpoint });
+    this.emit({ type: "gate.updated", sessionId: session.id, gate: this.gateFor(session.id) });
+    return { wait: checkpoint.id };
+  }
+
+  /** The developer's latest word on this task's approach gate: agreed, declined, or not asked yet. */
+  private approachState(sessionId: string, task: Set<string>): "agreed" | "declined" | null {
+    let state: "agreed" | "declined" | null = null;
+    for (const cp of this.store.listCheckpoints(sessionId)) {
+      if (cp.decision?.kind !== "approach" || cp.turnId === null || !task.has(cp.turnId) || cp.status !== "resolved") continue;
+      const outcome = decisionOutcome(cp);
+      if (outcome) state = outcome === "approved" ? "agreed" : "declined";
+    }
+    return state;
   }
 
   private checkDetected(session: PeerSession, tool: string, detected: Detection, more: boolean): ToolCheck {
@@ -1178,6 +1287,7 @@ export class CollaborationEngine {
       if (cp.decision) {
         const outcome = decisionOutcome(cp);
         if (outcome && cp.decision.kind === "contract") lines.push(`Changing ${list(cp.decision.subjects)}: ${outcome} for that task only; Peer asks again in a new task.`);
+        else if (outcome && cp.decision.kind === "approach") lines.push(`This task's changes growing past ${APPROACH_GATE_FILE_THRESHOLD} files: ${outcome} for that task only; Peer asks again in a new task.`);
         else if (outcome) lines.push(`Adding ${list(cp.decision.subjects)}: ${outcome === "approved" ? "approved" : "declined (do not add it)"}.`);
         continue;
       }
@@ -1365,17 +1475,33 @@ function list(subjects: string[]): string {
 }
 
 function what(d: DetectedDecision): string {
+  if (d.kind === "approach") return `continuing this task's changes past ${APPROACH_GATE_FILE_THRESHOLD} files`;
   return `${d.kind === "contract" ? "changing" : "adding"} ${list(d.subjects)}`;
 }
 
 /** "whether `x` is needed here", the thing the developer weighs. */
 function whetherNeeded(d: DetectedDecision): string {
+  if (d.kind === "approach") return "whether this task's changes should keep growing";
   const plural = d.subjects.length > 1;
   return d.kind === "contract" ? `whether ${list(d.subjects)} ${plural ? "need" : "needs"} to change here` : `whether ${list(d.subjects)} ${plural ? "are" : "is"} needed here`;
 }
 
+/** The question Peer asks when a Collaborate task's edits pass the approach-gate threshold. */
+function approachQuestion(files: string[]): { category: CheckpointCategory; question: string; context: string; options: CheckpointOption[] } {
+  return {
+    category: "confirm",
+    question: `This task's changes have grown to ${files.length} files. Continue with the changes?`,
+    context: `Peer paused the next edit before it runs (approach gate). Files so far: ${files.slice(0, 10).join(", ")}${files.length > 10 ? `, and ${files.length - 10} more` : ""}. Continuing approves the rest of this task's edits; stopping ends its edits here.`,
+    options: [
+      { label: APPROACH_APPROVE, description: "The agent continues editing in this task" },
+      { label: APPROACH_DECLINE, description: "The agent finishes without further edits in this task" },
+    ],
+  };
+}
+
 /** The question Peer asks for a held call, per style. */
 function decisionQuestion(d: DetectedDecision): { category: CheckpointCategory; question: string; context: string; options: CheckpointOption[] } {
+  if (d.kind === "approach") return approachQuestion(d.subjects);
   const plural = d.subjects.length > 1;
   const detected = `The agent is about to run ${d.action}. Peer detected this itself and paused it before it runs.`;
   if (d.kind === "contract") {
@@ -1430,6 +1556,9 @@ function heldCallDecision(cp: Checkpoint, hint: number): ToolDecision {
   const contract = d.kind === "contract";
   switch (decisionOutcome(cp)) {
     case "declined":
+      if (d.kind === "approach") {
+        return deny(`${paused}. They did not agree to continue${r.text ? ` and said: "${r.text}"` : ""}. It was not run. Finish this task without further edits and summarize what is done; Peer rejects further edit calls in this task, and the developer can ask for more changes in their next message.`);
+      }
       return deny(
         contract
           ? `${paused}. They decided against it${r.text ? ` and said: "${r.text}"` : ""}. It was not run. Continue without changing ${them}; Peer rejects further attempts in this task, and the developer can ask for the change in a later message.`
@@ -1462,7 +1591,7 @@ function decisionOutcome(cp: Checkpoint): "approved" | "declined" | null {
   const r = cp.resolution;
   if (!r) return null;
   if (r.action === "policy") return "approved";
-  if (r.action === "choose") return r.option === DECISION_DECLINE || r.option === CONTRACT_DECLINE ? "declined" : "approved";
+  if (r.action === "choose") return r.option === DECISION_DECLINE || r.option === CONTRACT_DECLINE || r.option === APPROACH_DECLINE ? "declined" : "approved";
   if (r.action === "answer" || r.action === "delegate" || r.action === "skip" || r.action === "go" || r.action === "direct") return "approved";
   return null;
 }

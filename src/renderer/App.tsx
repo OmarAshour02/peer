@@ -122,6 +122,7 @@ export function App() {
               <span className={`text-[12px] ${MODE_UI[snapshot.session.mode].color}`}>{MODE_UI[snapshot.session.mode].label}</span>
               {snapshot.session.runtime === "codex" && workspace && <SandboxNetworkToggle workspaceId={workspace.id} on={workspace.sandboxNetwork} />}
               {snapshot.session.runtime === "claude" && <AutoApprovalsToggle sessionId={snapshot.session.id} on={snapshot.session.autoApprovals} />}
+              {snapshot.session.mode === "collaborate" && <ApproachGateToggle sessionId={snapshot.session.id} on={snapshot.session.approachGate} />}
               <UndoButton />
               <button onClick={() => setShowChanges(!showChanges)} className="text-[12px] text-faint hover:text-fg">
                 {showChanges ? "Hide changes" : "Show changes"}
@@ -197,6 +198,34 @@ function AutoApprovalsToggle({ sessionId, on }: { sessionId: string; on: boolean
       className={`text-[12px] ${on ? "text-warn" : "text-faint hover:text-fg"}`}
     >
       Auto approvals: {on ? "on" : "off"}
+    </button>
+  );
+}
+
+/** Collaborate approach gate: Peer asks before a task's edits grow past five files. */
+function ApproachGateToggle({ sessionId, on }: { sessionId: string; on: boolean }) {
+  const api = usePeer((s) => s.api);
+  async function toggle() {
+    if (!api) return;
+    try {
+      await api.updateSession(sessionId, { approachGate: !on });
+    } catch (err) {
+      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return (
+    <button
+      onClick={() => void toggle()}
+      role="switch"
+      aria-checked={on}
+      title={
+        on
+          ? "When a task's edits grow past five files, Peer pauses the next edit and asks you to agree before it runs. Turn off to let large tasks run without asking."
+          : "Let large tasks run without asking. Turn on to agree before a task's edits grow past five files."
+      }
+      className={`text-[12px] ${on ? "text-warn" : "text-faint hover:text-fg"}`}
+    >
+      Approach gate: {on ? "on" : "off"}
     </button>
   );
 }

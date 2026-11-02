@@ -139,6 +139,10 @@ const MIGRATIONS: string[] = [
   -- The developer asked to discuss mid-turn: code changes are locked again until they proceed.
   ALTER TABLE turns ADD COLUMN relocked_at INTEGER;
   `,
+  `
+  -- Collaborate approach gate: Peer asks before a task's edits grow past a file threshold.
+  ALTER TABLE sessions ADD COLUMN approach_gate INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 type Row = Record<string, unknown>;
@@ -243,7 +247,7 @@ export class Store {
   }): PeerSession {
     const now = Date.now();
     // Auto approvals start off; the developer turns them on per session.
-    const session: PeerSession = { id: newId("ps"), ...input, autoApprovals: false, discussing: false, createdAt: now, updatedAt: now };
+    const session: PeerSession = { id: newId("ps"), ...input, autoApprovals: false, approachGate: false, discussing: false, createdAt: now, updatedAt: now };
     this.db
       .prepare(
         `INSERT INTO sessions (id, workspace_id, runtime, runtime_session_id, title, mode, model_provider, model_id, created_at, updated_at)
@@ -264,7 +268,7 @@ export class Store {
     return session;
   }
 
-  updateSession(id: string, patch: { title?: string; mode?: CollaborationModeId; model?: ModelRef | null; autoApprovals?: boolean; discussing?: boolean }): PeerSession {
+  updateSession(id: string, patch: { title?: string; mode?: CollaborationModeId; model?: ModelRef | null; autoApprovals?: boolean; approachGate?: boolean; discussing?: boolean }): PeerSession {
     const current = this.getSession(id);
     if (!current) throw new Error(`Unknown session ${id}`);
     const next: PeerSession = {
@@ -273,12 +277,13 @@ export class Store {
       mode: patch.mode ?? current.mode,
       model: patch.model === undefined ? current.model : patch.model,
       autoApprovals: patch.autoApprovals ?? current.autoApprovals,
+      approachGate: patch.approachGate ?? current.approachGate,
       discussing: patch.discussing ?? current.discussing,
       updatedAt: Date.now(),
     };
     this.db
-      .prepare("UPDATE sessions SET title = ?, mode = ?, model_provider = ?, model_id = ?, auto_approvals = ?, discussing = ?, updated_at = ? WHERE id = ?")
-      .run(next.title, next.mode, next.model?.providerId ?? null, next.model?.modelId ?? null, next.autoApprovals ? 1 : 0, next.discussing ? 1 : 0, next.updatedAt, id);
+      .prepare("UPDATE sessions SET title = ?, mode = ?, model_provider = ?, model_id = ?, auto_approvals = ?, approach_gate = ?, discussing = ?, updated_at = ? WHERE id = ?")
+      .run(next.title, next.mode, next.model?.providerId ?? null, next.model?.modelId ?? null, next.autoApprovals ? 1 : 0, next.approachGate ? 1 : 0, next.discussing ? 1 : 0, next.updatedAt, id);
     return next;
   }
 
@@ -572,6 +577,7 @@ function toSession(r: Row): PeerSession {
     mode: r.mode as CollaborationModeId,
     model: r.model_provider && r.model_id ? { providerId: String(r.model_provider), modelId: String(r.model_id) } : null,
     autoApprovals: Number(r.auto_approvals ?? 0) === 1,
+    approachGate: Number(r.approach_gate ?? 0) === 1,
     discussing: Number(r.discussing ?? 0) === 1,
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),

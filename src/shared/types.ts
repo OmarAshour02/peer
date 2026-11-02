@@ -78,15 +78,15 @@ export interface CheckpointResolution {
 }
 
 /** Kinds of engineering decision Peer detects itself from tool calls, before they run. */
-export const DECISION_KINDS = ["dependency", "contract"] as const;
+export const DECISION_KINDS = ["dependency", "contract", "approach"] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
 /** A decision Peer detected in a tool call (not one the agent chose to ask about). */
 export interface DetectedDecision {
   kind: DecisionKind;
-  /** What is being decided: package names, or contracts ("api/openapi.yaml", "package.json#exports"). */
+  /** What is being decided: package names, contracts ("api/openapi.yaml", "package.json#exports"), or the files a task has changed so far ("approach"). */
   subjects: string[];
-  /** Package ecosystem or manifest, e.g. "npm", "pypi"; "api" for a contract. */
+  /** Package ecosystem or manifest, e.g. "npm", "pypi"; "api" for a contract, "workspace" for an approach gate. */
   ecosystem: string;
   /** The tool action that carries the decision, as shown to the developer, e.g. "`npm install zod`". */
   action: string;
@@ -168,6 +168,11 @@ export interface PeerSession {
    * destructive-command approvals still apply. Off by default.
    */
   autoApprovals: boolean;
+  /**
+   * Collaborate approach gate: when this task's edits grow past a file-count threshold, Peer
+   * pauses the next edit and asks the developer to agree before it runs. Off by default.
+   */
+  approachGate: boolean;
   /**
    * "Discuss first" is in effect: follow-up messages keep discussing, with code changes locked,
    * until the developer proceeds (Proceed, Just do it, a go-ahead message) or ends the discussion.

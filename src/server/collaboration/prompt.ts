@@ -7,6 +7,7 @@ export const CHECKPOINT_TOOL = "peer_checkpoint";
 const DECISION_DESCRIPTIONS: Record<DecisionKind, string> = {
   dependency: "adding a new dependency (an install command or a manifest edit)",
   contract: "changing a public API contract (an OpenAPI, protobuf or GraphQL schema file, or `exports`/`bin` in package.json)",
+  approach: "continuing a task whose changes have grown past the approach-gate file threshold",
 };
 
 const CATEGORY_DESCRIPTIONS: Record<CheckpointCategory, string> = {
@@ -37,6 +38,8 @@ export interface PromptContext {
   decided?: readonly string[];
   /** The previous turn had code changes locked: say plainly that this one doesn't, or the agent may assume it still does. */
   previousTurnLocked?: boolean;
+  /** The session's Collaborate approach gate is on, with this file-count threshold. */
+  approachGateThreshold?: number;
 }
 
 /**
@@ -86,6 +89,11 @@ export function composeSystemPrompt(plan: EffectivePolicy, tool: string = CHECKP
     ...(plan.decisions.ask.length > 0
       ? [
           `- Peer itself pauses some actions before they run and asks the developer: ${plan.decisions.ask.map((k) => DECISION_DESCRIPTIONS[k]).join("; ")}. It does not ask again about a dependency the developer already approved or asked for, or a contract change they already approved in this task. If Peer rejects such a call with the developer's response, follow that response.`,
+        ]
+      : []),
+    ...(context.approachGateThreshold
+      ? [
+          `- Approach gate: this session asks the developer to agree when a task's edits grow past ${context.approachGateThreshold} files. Peer pauses the edit that crosses the threshold before it runs and asks them; if they stop the task, finish without further edits and summarize.`,
         ]
       : []),
     "",

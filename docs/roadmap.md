@@ -49,7 +49,7 @@
    - Done: a "confirm" checkpoint no longer opens an `engage` gate in Learn. An ordinary answer or choice on it approves the plan but keeps code changes locked (live and on a resumed turn); explicit controls on it (You decide, Just do it, Direct answer, Proceed) still unlock, and routine work keeps its own path. The agent is told to ask a hypothesis or concept question instead.
    - Classify tasks with a cheap model call.
    - Track how often each kind of checkpoint is answered versus skipped.
-2. **Collaborate approach gate.** An optional "agree before significant edits" gate for Collaborate, triggered by a diff-size or file-count threshold instead of always being on.
+2. **Collaborate approach gate.** Done: an optional "agree before significant edits" gate for Collaborate, on a file-count threshold instead of always being on. Per-session opt-in in the header (off by default, persisted); Peer counts distinct files a task's edit/write/patch calls target and pauses the call that would pass five on a Peer checkpoint ("Continue with the changes / Stop here") for the rest of the task. Just do it / Proceed / Direct answer tasks are not interrupted; shell-driven changes are not counted (documented limit).
 3. **Adaptive policy across sessions.** v0.2 adapts within a session (hands-off responses narrow the questions). Carrying that across sessions needs per-developer memory, deliberately not built yet.
 4. **Routine-work review.** Learn's routine declaration is the agent's judgment. Track how often it is used on tasks the developer later engages with, and consider a "this isn't routine, ask me" control.
 5. **Session UX.**

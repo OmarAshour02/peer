@@ -363,10 +363,10 @@ function requirementNames(text: string): Set<string> {
   return names;
 }
 
-/** The absolute path of a tool argument. Changes outside the workspace are a safety matter (denied or asked separately), not this one. */
+/** The absolute path of a tool argument, normalized so equivalent spellings of one file are one path. Changes outside the workspace are a safety matter (denied or asked separately), not this one. */
 function workspacePath(p: unknown, workspace: string): string | null {
   if (typeof p !== "string" || !p) return null;
-  const abs = isAbsolute(p) ? p : resolve(workspace, p);
+  const abs = resolve(workspace, p);
   return inside(workspace, abs) ? abs : null;
 }
 
@@ -502,6 +502,12 @@ export function isContractFile(relativePath: string): boolean {
 
 function isProjectFile(relativePath: string): boolean {
   return !dirname(relativePath).toLowerCase().split("/").some((d) => NOT_THE_PROJECT.has(d));
+}
+
+/** Distinct workspace files a write-like tool call targets, as absolute paths. Shell commands have none Peer can see. */
+export function editTargetPaths(tool: string, args: unknown, workspace: string): string[] {
+  const a = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  return [...new Set(changedPaths(tool, a, workspace).map((f) => f.path))];
 }
 
 /** Every workspace file a write-like tool call changes, including both ends of a rename. */

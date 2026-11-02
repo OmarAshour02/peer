@@ -211,6 +211,150 @@ describe("question quality in Learn", () => {
   });
 });
 
+describe("Collaborate approach gate", () => {
+  const writeFile = (s: PeerSession, file: string) => engine().checkTool(s.runtimeSessionId, "write", { filePath: file, content: "x" });
+  const evalFile = async (s: PeerSession, file: string) => {
+    const r = await engine().evaluateTool(s.runtimeSessionId, "write", { filePath: file, content: "x" });
+    return r as { allow: boolean; wait?: string };
+  };
+
+  async function heldFile(s: PeerSession, file: string) {
+    const call = writeFile(s, file);
+    await tick();
+    const cp = pending(s).find((c) => c.source === "peer");
+    expect(cp).toBeDefined();
+    return { call, cp: cp! };
+  }
+
+  it("is off by default: many files edit freely and nothing is held", async () => {
+    const s = await newSession("collaborate");
+    expect(s.approachGate).toBe(false);
+    await service.send(s.id, "big refactor");
+    for (let i = 1; i <= 7; i++) expect((await writeFile(s, `f${i}.js`)).allow).toBe(true);
+    expect(pending(s)).toHaveLength(0);
+  });
+
+  it("holds the call that would pass five distinct files, and approval covers the rest of the task", async () => {
+    const s = await newSession("collaborate");
+    service.updateSession(s.id, { approachGate: true });
+    expect(store.getSession(s.id)!.approachGate).toBe(true);
+    await service.send(s.id, "big refactor");
+    for (let i = 1; i <= 5; i++) expect((await evalFile(s, `f${i}.js`)).allow).toBe(true);
+    // Edits to already-counted files do not count again.
+    expect((await evalFile(s, "f1.js")).allow).toBe(true);
+    const heldEval = await evalFile(s, "f6.js");
+    expect(heldEval).toMatchObject({ wait: expect.any(String) });
+    const cp = pending(s).find((c) => c.source === "peer")!;
+    expect(cp.decision?.kind).toBe("approach");
+    await resolve(cp.id, "choose", { option: "Continue with the changes" });
+    expect((await writeFile(s, "f6.js")).allow).toBe(true);
+    expect((await writeFile(s, "f7.js")).allow).toBe(true);
+    expect(pending(s)).toHaveLength(0);
+  });
+
+  it("equivalent spellings of one file count once", async () => {
+    const s = await newSession("collaborate");
+    service.updateSession(s.id, { approachGate: true });
+    await service.send(s.id, "big refactor");
+    for (const spelling of ["same.js", `${dir}/same.js`, `${dir}/./same.js`, `${dir}/sub/../same.js`, "sub/../same.js"]) {
+      expect((await evalFile(s, spelling)).allow, spelling).toBe(true);
+    }
+    // That was one distinct file; four more edit freely and the sixth asks.
+    for (let i = 2; i <= 5; i++) expect((await evalFile(s, `f${i}.js`)).allow).toBe(true);
+    expect(await evalFile(s, "f6.js")).toMatchObject({ wait: expect.any(String) });
+  });
+
+  it("a multi-file patch counts all its files at once", async () => {
+    const s = await newSession("collaborate");
+    service.updateSession(s.id, { approachGate: true });
+    await service.send(s.id, "big refactor");
+    for (let i = 1; i <= 4; i++) expect((await evalFile(s, `f${i}.js`)).allow).toBe(true);
+    const patch = await engine().evaluateTool(s.runtimeSessionId, "patch", {
+      changes: [{ path: "f5.js", kind: { type: "update" } }, { path: "f6.js", kind: { type: "update" } }],
+    });
+    expect(patch).toMatchObject({ wait: expect.any(String) });
+  });
+
+  it("declining stops the held call and further edits in the task, without asking again", async () => {
+    const s = await newSession("collaborate");
+    service.updateSession(s.id, { approachGate: true });
+    await service.send(s.id, "big refactor");
+    for (let i = 1; i <= 5; i++) expect((await evalFile(s, `f${i}.js`)).allow).toBe(true);
+    const { call, cp } = await heldFile(s, "f6.js");
+    await resolve(cp.id, "choose", { option: "Stop here" });
+    expect(await call).toMatchObject({ allow: false, reason: expect.stringMatching(/did not agree|Stop/) });
+    const later = await evalFile(s, "f7.js");
+    expect(later.allow).toBe(false);
+    expect(pending(s)).toHaveLength(0);
+    // A new task asks again.
+    idle(s);
+    await service.send(s.id, "another refactor");
+    for (let i = 1; i <= 5; i++) expect((await evalFile(s, `g${i}.js`)).allow).toBe(true);
+    expect(await evalFile(s, "g6.js")).toMatchObject({ wait: expect.any(String) });
+  });
+
+  it("a dependency held on the sixth file still passes the approach gate after approval", async () => {
+    const s = await newSession("collaborate");
+    service.updateSession(s.id, { approachGate: true });
+    await service.send(s.id, "big refactor");
+    for (let i = 1; i <= 5; i++) expect((await evalFile(s, `f${i}.js`)).allow).toBe(true);
+    const manifest = () => engine().checkTool(s.runtimeSessionId, "write", { filePath: "package.json", content: JSON.stringify({ name: "app", dependencies: { zod: "^3.0.0" } }) });
+    const call = manifest();
+    await tick();
+    const dep = pending(s).find((c) => c.decision?.kind === "dependency")!;
+    expect(dep).toBeDefined();
+    await resolve(dep.id, "choose", { option: "Add it" });
+    // Approved, but not run yet: the same call still has to pass the approach gate.
+    expect(await call).toMatchObject({ allow: false });
+    const retry = await evalFile(s, "package.json");
+    expect(retry).toMatchObject({ wait: expect.any(String) });
+    const gate = pending(s).find((c) => c.decision?.kind === "approach")!;
+    await resolve(gate.id, "choose", { option: "Continue with the changes" });
+    expect((await manifest()).allow).toBe(true);
+  });
+
+  it("a dependency-approved manifest counts toward the task's files", async () => {
+    const s = await newSession("collaborate");
+    service.updateSession(s.id, { approachGate: true });
+    await service.send(s.id, "big refactor");
+    const manifest = () => engine().checkTool(s.runtimeSessionId, "write", { filePath: "package.json", content: JSON.stringify({ name: "app", dependencies: { zod: "^3.0.0" } }) });
+    const call = manifest();
+    await tick();
+    const dep = pending(s).find((c) => c.decision?.kind === "dependency")!;
+    await resolve(dep.id, "choose", { option: "Add it" });
+    expect(await call).toMatchObject({ allow: false });
+    expect((await manifest()).allow).toBe(true);
+    for (let i = 1; i <= 4; i++) expect((await evalFile(s, `f${i}.js`)).allow).toBe(true);
+    // package.json plus f1-f4 is five files; the next distinct file crosses the threshold.
+    expect(await evalFile(s, "f5.js")).toMatchObject({ wait: expect.any(String) });
+  });
+
+  it("does not interrupt Just do it or Learn", async () => {
+    const delegated = await newSession("collaborate");
+    service.updateSession(delegated.id, { approachGate: true });
+    await service.send(delegated.id, "big refactor", "delegate");
+    for (let i = 1; i <= 7; i++) expect((await writeFile(delegated, `f${i}.js`)).allow).toBe(true);
+    expect(pending(delegated)).toHaveLength(0);
+
+    const learn = await newSession("learn");
+    service.updateSession(learn.id, { approachGate: true });
+    await service.send(learn.id, "big refactor");
+    // Learn's engage gate stops the edit first; no approach checkpoint appears.
+    expect((await writeFile(learn, "f1.js")).allow).toBe(false);
+    expect(pending(learn)).toHaveLength(0);
+  });
+
+  it("the toggle is validated over the API", async () => {
+    const app = createApp({ service, hub: new EventHub(), apiToken: "api", bridgeToken: "b", allowedOrigins: [] });
+    const s = await newSession("collaborate");
+    const patch = (body: unknown) => app.request(`/api/sessions/${s.id}`, { method: "PATCH", headers: { authorization: ["Bearer", "api"].join(" "), "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect((await patch({ approachGate: "yes" })).status).toBe(400);
+    const ok = await patch({ approachGate: true });
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as PeerSession).approachGate).toBe(true);
+  });
+});
+
 describe("adaptive involvement, not question quotas", () => {
   it("tells the agent to weigh each decision, with a ceiling that is not a target", async () => {
     const s = await newSession("collaborate");
@@ -975,6 +1119,29 @@ describe("session persistence", () => {
       });
     }
   }
+
+  it("answering an interrupted approach question in Collaborate resumes agreed", async () => {
+    const reopen = fileSetup();
+    const s = await newSession("collaborate");
+    service.updateSession(s.id, { approachGate: true });
+    await service.send(s.id, "big refactor");
+    const evalFile = async (file: string) => (await engine().evaluateTool(s.runtimeSessionId, "write", { filePath: file, content: "x" })) as { allow: boolean; wait?: string };
+    for (let i = 1; i <= 5; i++) expect((await evalFile(`f${i}.js`)).allow).toBe(true);
+    expect(await evalFile("f6.js")).toMatchObject({ wait: expect.any(String) });
+    const cp = pending(s).find((c) => c.source === "peer")!;
+    reopen();
+    expect(store.getCheckpoint(cp.id)!.status).toBe("interrupted");
+    await resolve(cp.id, "choose", { option: "Continue with the changes" });
+    expect((await engine().checkTool(s.runtimeSessionId, "write", { filePath: "f6.js", content: "x" })).allow).toBe(true);
+  });
+
+  it("the approach gate toggle survives a restart", async () => {
+    const reopen = fileSetup();
+    const s = await newSession("collaborate");
+    service.updateSession(s.id, { approachGate: true });
+    reopen();
+    expect(store.getSession(s.id)!.approachGate).toBe(true);
+  });
 
   it("answering an interrupted confirm question in Learn resumes locked until the developer engages", async () => {
     const reopen = fileSetup();
