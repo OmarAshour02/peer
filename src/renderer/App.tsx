@@ -4,6 +4,7 @@ import { PeerApi, resolveConfig } from "./api";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { Composer } from "./components/Composer";
 import { ProvidersDialog } from "./components/ProvidersDialog";
+import { RuntimeSettingsDialog } from "./components/RuntimeSettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { Transcript } from "./components/Transcript";
 import { MODE_UI } from "./modes";
@@ -15,6 +16,7 @@ export function App() {
   const kind = usePeer(activeRuntime);
   const runtimes = usePeer((s) => s.runtimes);
   const providersOpen = usePeer((s) => s.providersOpen);
+  const settingsOpen = usePeer((s) => s.settingsOpen);
   const runtime = runtimeInfo({ runtimes }, kind).status;
   const [fatal, setFatal] = useState<string | null>(null);
   const [showChanges, setShowChanges] = useState(true);
@@ -62,6 +64,7 @@ export function App() {
   return (
     <div className="flex h-full" data-peer-ready="true">
       {providersOpen && <ProvidersDialog />}
+      {settingsOpen && <RuntimeSettingsDialog />}
       <Sidebar />
       <main className="flex min-w-0 flex-1 flex-col">
         {runtime.state !== "ready" && (

@@ -9,6 +9,7 @@ import { mergePath, providerVariables, resolveLoginShellEnv } from "./platform.j
 import type { RuntimeHooks } from "./runtime/adapter.js";
 import { ClaudeCodeAdapter } from "./runtime/claude/adapter.js";
 import { CodexAdapter } from "./runtime/codex/adapter.js";
+import { GeminiAdapter } from "./runtime/gemini/adapter.js";
 import { resolveOpenCodeBinary } from "./runtime/opencode/binary.js";
 import { OpenCodeAdapter } from "./runtime/opencode/adapter.js";
 import { RuntimeSet } from "./runtime/set.js";
@@ -107,8 +108,9 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
       bridgeToken,
       log: (line) => log(`[opencode] ${line}`),
     }),
-    new ClaudeCodeAdapter({ env, storage: store, hooks, dataDir: opts.dataDir, binary: process.env.PEER_CLAUDE_BIN, log }),
-    new CodexAdapter({ env, storage: store, hooks, dataDir: opts.dataDir, binary: process.env.PEER_CODEX_BIN, version: peerVersion(opts.appRoot), log }),
+    new ClaudeCodeAdapter({ env, storage: store, hooks, dataDir: opts.dataDir, binary: process.env.PEER_CLAUDE_BIN, settings: () => store.getPreferences().runtimeSettings, log }),
+    new CodexAdapter({ env, storage: store, hooks, dataDir: opts.dataDir, binary: process.env.PEER_CODEX_BIN, version: peerVersion(opts.appRoot), settings: () => store.getPreferences().runtimeSettings, log }),
+    new GeminiAdapter({ env, storage: store, dataDir: opts.dataDir, binary: process.env.PEER_GEMINI_BIN, settings: () => store.getPreferences().runtimeSettings, log }),
   ]);
   service = new PeerService(store, runtimes, hub, { snapshotDir: join(opts.dataDir, "snapshots", "turns") });
   app = createApp({

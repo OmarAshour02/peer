@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   DEFAULT_MODE,
+  DEFAULT_RUNTIME_SETTINGS,
   type Checkpoint,
   type CheckpointResolution,
   type CheckpointStatus,
@@ -16,6 +17,7 @@ import {
   type PeerSession,
   type Preferences,
   type RuntimeKind,
+  type RuntimeSettings,
   type Turn,
   type TurnIntent,
   type Workspace,
@@ -535,6 +537,7 @@ export class Store {
       defaultRuntime: runtime && RUNTIME_KINDS.includes(runtime) ? runtime : DEFAULT_RUNTIME,
       runtimeChosen: runtime && RUNTIME_KINDS.includes(runtime) ? runtime : null,
       lastSessionId: lastSessionId && this.getSession(lastSessionId) ? lastSessionId : null,
+      runtimeSettings: { ...DEFAULT_RUNTIME_SETTINGS, ...((get("runtimeSettings") as Partial<RuntimeSettings> | undefined) ?? {}) },
     };
   }
 
@@ -543,6 +546,7 @@ export class Store {
     if (prefs.defaultMode) put.run("defaultMode", JSON.stringify(prefs.defaultMode));
     if (prefs.defaultRuntime) put.run("defaultRuntime", JSON.stringify(prefs.defaultRuntime));
     if (prefs.lastSessionId !== undefined) put.run("lastSessionId", JSON.stringify(prefs.lastSessionId));
+    if (prefs.runtimeSettings) put.run("runtimeSettings", JSON.stringify({ ...DEFAULT_RUNTIME_SETTINGS, ...prefs.runtimeSettings }));
     return this.getPreferences();
   }
 }

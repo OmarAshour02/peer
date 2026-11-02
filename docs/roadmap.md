@@ -23,12 +23,22 @@
 - Adaptive involvement instead of quotas: a ceiling, per-session adaptation to hands-off responses, earlier decisions given to the agent, repeated questions declined, routine work in Learn without a question.
 - Claude Code and Codex report token usage like OpenCode; the integration evaluation has run, time, tool-call and token limits.
 
-## Next: more runtimes and runtime polish
+## Done: runtime polish
 
-1. **More agents** behind the same adapter interface: Gemini CLI, Cursor, or anything speaking the Agent Client Protocol (ACP), which T3 Code also uses for some providers.
-2. **Gate MCP tools on Codex before they run.** Today Peer stops the turn after a locked-gate MCP call starts. Prevention needs Codex to ask its client before MCP calls, or Peer to proxy the developer's MCP servers.
-3. **Undo that truncates the CLI session.** Undo drops a Claude Code or Codex turn from Peer's transcript, but the CLI session keeps it (the agent is told instead). Truncate it there too: Claude's `resumeSessionAt` / `resumeDropsTurn`, Codex's `thread/revert` (`beforeTurnId`, in 0.163 but untested).
-4. **Runtime settings in the UI**: CLI paths, Claude permission mode, Codex reasoning effort.
+- **Gemini CLI (read-only adapter; live CLI unverified)** behind the same adapter interface: headless `gemini -p` per turn with `--output-format stream-json`; Peer captures the `init` event's `session_id` and later resumes that exact conversation. Every turn runs `--approval-mode plan`, because Peer cannot approve individual Gemini commands, so Gemini explores and proposes but does not apply changes. It has no checkpoint tool or detected-decision gate; those gaps are documented in `PEER.md`. Graceful degradation when the binary is absent is tested. A live headless turn was not run (binary not installed here; would need login + quota), so real plan-mode/stream/resume semantics remain unverified. Evidence: [`docs/cli-proof.md`](cli-proof.md).
+- **Undo truncates the CLI session.** Claude `forgetTurns` forks at the last kept turn's message UUID (deletes when all undone) and remaps kept turn UUIDs into the fork so repeated undos keep working; Codex `forgetTurns` calls `thread/revert` with the first undone turn's id; both fall back to telling the agent. CLI proof: live `thread/revert` method-exists probe against `codex app-server` 0.166.0, live SDK `forkSession`/`deleteSession` probes, schema `ThreadRevertParams` match. Evidence: [`docs/cli-proof.md`](cli-proof.md).
+- **Runtime settings in the UI**: CLI paths, Claude permission mode, Codex reasoning effort; persisted via preferences, CLI paths applied on runtime restart, mode/effort at session start. Covered by unit tests; no live UI click-through.
+
+## Partially done: Codex MCP gating
+
+- Shipped: gated turns are told up front not to start MCP tools, and a non-read-only `mcpToolCall` that starts while locked aborts the turn (fail closed). A forward-compatible `item/mcpToolCall/requestApproval` handler is ready if Codex adds that method.
+- Not done: true pre-execution prevention. Codex 0.166.0 has no MCP approval method in its protocol schema, so prevention still needs Codex protocol support or Peer proxying the developer's MCP servers. This item stays open below.
+
+## Next: more runtimes and MCP prevention
+
+1. **Cursor or ACP** behind the same `AgentRuntimeAdapter` interface, including anything speaking the Agent Client Protocol (ACP), which T3 Code also uses for some providers.
+2. **Writable Gemini turns** once individual Gemini commands can pass through Peer's permission and destructive-command gates.
+3. **Codex MCP pre-execution prevention**: proxy the developer's MCP servers through Peer, or adopt a Codex protocol approval method if one ships.
 
 ## Next: Milestone 4, collaboration quality
 

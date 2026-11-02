@@ -125,10 +125,10 @@ export interface Workspace {
 }
 
 /**
- * The coding-agent runtime a session runs on. OpenCode is bundled with Peer; Claude Code and
- * Codex use the CLI (and login) the developer already has installed.
+ * The coding-agent runtime a session runs on. OpenCode is bundled with Peer; Claude Code, Codex
+ * and Gemini CLI use the CLI (and login) the developer already has installed.
  */
-export const RUNTIME_KINDS = ["opencode", "claude", "codex"] as const;
+export const RUNTIME_KINDS = ["opencode", "claude", "codex", "gemini"] as const;
 export type RuntimeKind = (typeof RUNTIME_KINDS)[number];
 export const DEFAULT_RUNTIME: RuntimeKind = "opencode";
 
@@ -136,7 +136,7 @@ export const DEFAULT_RUNTIME: RuntimeKind = "opencode";
  * Until the developer picks a runtime, new sessions use the first of these that is ready: the
  * agents they are already signed in to first, the bundled runtime (any other model) last.
  */
-export const RUNTIME_PREFERENCE: readonly RuntimeKind[] = ["claude", "codex", "opencode"];
+export const RUNTIME_PREFERENCE: readonly RuntimeKind[] = ["claude", "codex", "gemini", "opencode"];
 
 /** The runtime for new sessions: the developer's own pick while it is usable, else the best one that is ready. */
 export function pickDefaultRuntime(chosen: RuntimeKind | null, runtimes: readonly { kind: RuntimeKind; status: { state: string } }[]): RuntimeKind {
@@ -395,7 +395,41 @@ export interface Preferences {
   runtimeChosen: RuntimeKind | null;
   /** Session to reopen on launch. Kept server-side: the UI origin (port) changes between launches. */
   lastSessionId: string | null;
+  /** CLI runtime behavior, set in Runtime settings and applied when sessions start. */
+  runtimeSettings: RuntimeSettings;
 }
+
+/** Claude Code's permission mode for turns without session auto-approvals. */
+export const CLAUDE_PERMISSION_MODES = ["acceptEdits", "auto"] as const;
+export type ClaudePermissionMode = (typeof CLAUDE_PERMISSION_MODES)[number];
+
+/** Reasoning effort values Codex advertises (the protocol takes any non-empty string). */
+export const CODEX_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
+
+/**
+ * CLI runtime behavior. Paths override the matching `PEER_*_BIN` variable (a restart of the
+ * runtime picks them up); the permission mode and effort apply to sessions as they start.
+ */
+export interface RuntimeSettings {
+  /** Explicit `claude` executable, or null for PATH. */
+  claudeBin: string | null;
+  /** Explicit `codex` executable, or null for PATH. */
+  codexBin: string | null;
+  /** Explicit `gemini` executable, or null for PATH. */
+  geminiBin: string | null;
+  /** Claude Code's permission mode unless the session has auto-approvals on. */
+  claudePermissionMode: ClaudePermissionMode;
+  /** Codex reasoning effort (`turn/start effort`), or null for the account default. */
+  codexEffort: string | null;
+}
+
+export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
+  claudeBin: null,
+  codexBin: null,
+  geminiBin: null,
+  claudePermissionMode: "acceptEdits",
+  codexEffort: null,
+};
 
 // ---------------------------------------------------------------------------
 // Events pushed to the renderer over SSE

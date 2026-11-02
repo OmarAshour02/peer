@@ -53,6 +53,7 @@ export function Sidebar() {
             offline
           </div>
         ) : (
+          <div className="flex items-center">
           <button
             onClick={() => usePeer.getState().setProvidersOpen(true)}
             title="Models & providers"
@@ -69,6 +70,15 @@ export function Sidebar() {
               </span>
             ))}
           </button>
+          <button
+            onClick={() => usePeer.getState().setSettingsOpen(true)}
+            title="Runtime settings (CLI paths, permission mode, effort)"
+            aria-label="Runtime settings"
+            className="rounded px-1.5 py-0.5 text-[13px] text-faint hover:bg-raised hover:text-muted"
+          >
+            ⚙
+          </button>
+          </div>
         )}
       </div>
 

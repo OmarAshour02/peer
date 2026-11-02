@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   createSdkMcpServer,
+  deleteSession as sdkDeleteSession,
+  forkSession as sdkForkSession,
   getSessionInfo,
+  getSessionMessages as sdkGetSessionMessages,
   query,
   tool,
   type CanUseTool,
@@ -11,10 +14,12 @@ import {
   type PermissionUpdate,
   type Query,
   type SDKMessage,
+  type SessionMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import {
   CHECKPOINT_CATEGORIES,
+  type ClaudePermissionMode,
   type ModelsResponse,
   type PeerMessage,
   type PermissionReply,
@@ -22,7 +27,12 @@ import {
   type RuntimeStatus,
 } from "../../../shared/types.js";
 import { isDestructiveCommand } from "../../collaboration/safety.js";
-import type { AgentRuntimeAdapter, PromptInput, RuntimeEvent, RuntimeHooks } from "../adapter.js";
+import type { AgentRuntimeAdapter, PromptInput, RuntimeEvent, RuntimeHooks, RuntimeSettingsProvider } from "../adapter.js";
+
+/** The permission mode for a turn: session auto-approvals win, else the configured default. */
+export function claudePermissionMode(autoApprovals: boolean | undefined, def: ClaudePermissionMode): "auto" | "acceptEdits" {
+  return autoApprovals ? "auto" : def;
+}
 import { findExecutable, runCli } from "../cli.js";
 import { diffSinceSnapshot, snapshotWorkspace } from "../git-snapshot.js";
 import { Transcript, titleFromPrompt, type RuntimeStorage } from "../transcript.js";
@@ -43,11 +53,67 @@ export interface ClaudeAdapterOptions {
   /** Explicit path to the `claude` executable (PEER_CLAUDE_BIN); otherwise found on PATH. */
   binary?: string;
   log: (line: string) => void;
+  /** Live runtime settings; `claudeBin` there overrides `binary` (a restart picks it up). */
+  settings?: RuntimeSettingsProvider;
+  /** Session truncate operations (overridable in tests; default to the Agent SDK). */
+  forkSession?: typeof sdkForkSession;
+  deleteSession?: typeof sdkDeleteSession;
+  /** Transcript reader used to remap turn UUIDs after a fork (overridable in tests). */
+  getSessionMessages?: typeof sdkGetSessionMessages;
 }
+
+/**
+ * One Peer turn's fork point for undo: when the turn started (adapter clock, so it compares
+ * with the engine's `since`) and the last top-level assistant message UUID the CLI streamed
+ * for it (`forkSession upToMessageId` of the last kept turn truncates everything after it).
+ */
+export interface ClaudeTurnRecord {
+  t: number;
+  u: string | null;
+}
+
+/**
+ * Where `forgetTurns` truncates the CLI session: fork the last kept turn, reset an empty
+ * one, or fall back to telling the agent. Forking needs the actual last kept turn's UUID:
+ * forking at an earlier turn would silently drop a later kept turn from the CLI session.
+ */
+export function forkPoint(records: ClaudeTurnRecord[], since: number): { kind: "fork"; upToMessageId: string } | { kind: "reset" } | { kind: "unknown" } {
+  if (records.length === 0) return { kind: "unknown" };
+  const kept = records.filter((r) => r.t < since);
+  if (kept.length === 0) return { kind: "reset" };
+  const last = kept[kept.length - 1];
+  return last?.u ? { kind: "fork", upToMessageId: last.u } : { kind: "unknown" };
+}
+
+type TranscriptMessage = Pick<SessionMessage, "type" | "uuid" | "parent_tool_use_id" | "parent_agent_id">;
+
+function topLevelAssistantUuids(messages: TranscriptMessage[]): string[] {
+  return messages.filter((m) => m.type === "assistant" && !m.parent_tool_use_id && !m.parent_agent_id).map((m) => m.uuid);
+}
+
+/**
+ * Translate kept turn records into a forked session. `forkSession` remaps every message
+ * UUID, but it preserves transcript order, so the fork's assistant messages pair with the
+ * original's by position. A record that cannot be paired loses its UUID, which makes the
+ * next undo fall back instead of truncating at a stale ID.
+ */
+export function remapTurnUuids(records: ClaudeTurnRecord[], original: TranscriptMessage[], forked: TranscriptMessage[]): ClaudeTurnRecord[] {
+  const before = topLevelAssistantUuids(original);
+  const after = topLevelAssistantUuids(forked);
+  const mapped = new Map(before.slice(0, after.length).map((uuid, index) => [uuid, after[index]]));
+  return records.map((record) => ({ ...record, u: record.u ? (mapped.get(record.u) ?? null) : null }));
+}
+
+/** Turn records Peer keeps per session (capped; each undo prunes the undone ones). */
+const MAX_TURN_RECORDS = 200;
 
 interface SessionState {
   /** Claude Code has created the session on disk, so later turns resume it. */
   started?: boolean;
+  /** The CLI-side session to resume (a fork after undo, else the Peer session id). */
+  claudeSessionId?: string;
+  /** Fork points of past turns, oldest first. */
+  turns?: ClaudeTurnRecord[];
   /** Workspace git tree when the session first ran, for the Changes panel. */
   baseline?: string | null;
   titled?: boolean;
@@ -75,6 +141,9 @@ interface Run {
   blockCount: Map<string, number>;
   /** tool_use id -> where its tool part lives. */
   tools: Map<string, { messageId: string; partId: string; claudeTool: string }>;
+  /** Adapter clock when the turn started, and the last top-level assistant UUID it streamed. */
+  startedAt: number;
+  lastUuid: string | null;
 }
 
 const FALLBACK_MODELS = [
@@ -170,7 +239,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   /** Detect the CLI and its login. Never logs in or changes anything (status probes only). */
   async start(): Promise<void> {
     this.setStatus({ state: "starting" });
-    this.binary = findExecutable("claude", this.opts.env, this.opts.binary);
+    this.binary = findExecutable("claude", this.opts.env, this.opts.settings?.().claudeBin ?? this.opts.binary ?? undefined);
     if (!this.binary) {
       this.setStatus({ state: "unavailable", error: "Claude Code is not installed (no `claude` on PATH). Install it, run `claude auth login`, then restart this runtime." });
       return;
@@ -291,13 +360,48 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   }
 
   /**
-   * Undo drops the turns from Peer's transcript. The CLI's own session keeps them, so the agent
-   * still remembers that work and is told on its next turn that it was undone.
+   * Undo truncates the CLI session too: fork it at the last kept turn (`resumeSessionAt` would
+   * only apply on the next query, while a fork takes effect now and reports success), or delete
+   * it when every turn is undone so the next turn starts fresh. When neither is possible the
+   * turns stay in the CLI session and the agent is told on its next turn instead.
    */
-  async forgetTurns(_directory: string, sessionId: string, since: number): Promise<boolean> {
+  async forgetTurns(directory: string, sessionId: string, since: number): Promise<boolean> {
     if (this.runs.has(sessionId)) throw new Error("The agent is still working on this session.");
     this.transcript(sessionId).dropSince(since);
-    return false;
+    const state = this.state(sessionId);
+    const fork = this.opts.forkSession ?? sdkForkSession;
+    const remove = this.opts.deleteSession ?? sdkDeleteSession;
+    const claudeId = state.claudeSessionId ?? sessionId;
+    if (!state.started) return true;
+    const plan = forkPoint(state.turns ?? [], since);
+    try {
+      if (plan.kind === "fork") {
+        const { sessionId: forked } = await fork(claudeId, { dir: directory, upToMessageId: plan.upToMessageId });
+        const kept = (state.turns ?? []).filter((r) => r.t < since);
+        let turns: ClaudeTurnRecord[] = kept.map((record) => ({ ...record, u: null }));
+        try {
+          const readMessages = this.opts.getSessionMessages ?? sdkGetSessionMessages;
+          const [original, forkedMessages] = await Promise.all([
+            readMessages(claudeId, { dir: directory }),
+            readMessages(forked, { dir: directory }),
+          ]);
+          turns = remapTurnUuids(kept, original, forkedMessages);
+        } catch (err) {
+          this.opts.log(`[claude] remapping forked session UUIDs failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        this.saveState(sessionId, { claudeSessionId: forked, turns });
+        return true;
+      }
+      if (plan.kind === "reset") {
+        await remove(claudeId, { dir: directory });
+        this.saveState(sessionId, { started: false, claudeSessionId: undefined, turns: [] });
+        return true;
+      }
+      return false;
+    } catch (err) {
+      this.opts.log(`[claude] truncating the session for undo failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
   }
 
   async getParentSessionId(): Promise<string | null> {
@@ -356,11 +460,13 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
 
     const transcript = this.transcript(sessionId);
     transcript.addUserMessage(`user_${randomUUID()}`, input.text);
-    const run: Run = { abort: new AbortController(), query: null, directory, permissions: new Map(), blockCount: new Map(), tools: new Map() };
+    const run: Run = { abort: new AbortController(), query: null, directory, permissions: new Map(), blockCount: new Map(), tools: new Map(), startedAt: Date.now(), lastUuid: null };
     this.runs.set(sessionId, run);
     this.emit({ type: "session.status", sessionId, status: "busy" });
 
     const model = input.model?.modelId && input.model.modelId !== "default" ? input.model.modelId : undefined;
+    // After an undo the CLI session may be a fork; otherwise it is the Peer session itself.
+    const claudeId = state.claudeSessionId ?? sessionId;
     try {
       const turn = claudeTurnPrompt(input);
       run.query = query({
@@ -370,7 +476,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
           cwd: directory,
           env: this.opts.env,
           abortController: run.abort,
-          ...(state.started ? { resume: sessionId } : { sessionId }),
+          ...(state.started ? { resume: claudeId } : { sessionId: claudeId }),
           model,
           systemPrompt: { type: "preset", preset: "claude_code", append: turn.append },
           // The developer's own Claude Code settings, CLAUDE.md files, MCP servers and permission rules apply.
@@ -379,7 +485,8 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
           // still decides whether they may happen, and other approvals reach the developer. With
           // auto approvals, Claude Code's classifier settles prompts and asks only when unsure;
           // Peer's PreToolUse hook (gate, destructive-command ask) runs first either way.
-          permissionMode: input.autoApprovals ? "auto" : "acceptEdits",
+          // Without them, the configured default mode applies (Runtime settings).
+          permissionMode: claudePermissionMode(input.autoApprovals, this.opts.settings?.().claudePermissionMode ?? "acceptEdits"),
           includePartialMessages: true,
           mcpServers: { peer: this.checkpointServer(sessionId, run) },
           // Peer checkpoints replace Claude Code's own question tool.
@@ -514,6 +621,9 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
     } catch (err) {
       if (!run.abort.signal.aborted) error = err instanceof Error ? err.message : String(err);
     } finally {
+      // Kept synchronously with runs.delete: forgetTurns refuses while the run is registered,
+      // so every record it reads belongs to a finished turn.
+      this.saveState(sessionId, { turns: [...(this.state(sessionId).turns ?? []), { t: run.startedAt, u: run.lastUuid }].slice(-MAX_TURN_RECORDS) });
       this.runs.delete(sessionId);
       for (const id of messageIds) {
         transcript.failRunningTools(id, run.abort.signal.aborted ? "Stopped" : "The run ended before this finished");
@@ -521,7 +631,8 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       }
       if (error) this.emit({ type: "session.error", sessionId, error });
       this.emit({ type: "session.idle", sessionId });
-      void this.refreshTitle(run.directory, sessionId);
+      // Titles come from the CLI session, which may be a fork after undo.
+      void this.refreshTitle(run.directory, this.state(sessionId).claudeSessionId ?? sessionId, sessionId);
     }
   }
 
@@ -552,6 +663,8 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       case "assistant": {
         const api = message.message;
         messageIds.add(api.id);
+        // The fork point for undo: the last top-level assistant message of the last kept turn.
+        if (!message.parent_tool_use_id && message.uuid) run.lastUuid = message.uuid;
         transcript.startAssistantMessage(api.id, { providerId: "claude", modelId: api.model });
         // Claude Code emits one assistant message per completed content block, in block order.
         let index = run.blockCount.get(api.id) ?? 0;
@@ -618,9 +731,9 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   private readonly currentMessage = new Map<string, string>();
 
   /** Claude Code summarizes sessions itself; prefer that title once it exists. */
-  private async refreshTitle(directory: string, sessionId: string) {
+  private async refreshTitle(directory: string, lookupId: string, sessionId: string) {
     try {
-      const info = await getSessionInfo(sessionId, { dir: directory });
+      const info = await getSessionInfo(lookupId, { dir: directory });
       const title = info?.customTitle || info?.summary;
       if (title) this.emit({ type: "session.updated", sessionId, title, parentId: null });
     } catch {

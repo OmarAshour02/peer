@@ -4,7 +4,7 @@ import type { ModelsResponse, PeerMessage, PermissionReply, PermissionRequest, R
 import { CHECKPOINT_CATEGORIES } from "../../../shared/types.js";
 import { CHECKPOINT_TOOL } from "../../collaboration/prompt.js";
 import { isDestructiveCommand, unwrapShell } from "../../collaboration/safety.js";
-import type { AgentRuntimeAdapter, PromptInput, RuntimeEvent, RuntimeHooks } from "../adapter.js";
+import type { AgentRuntimeAdapter, PromptInput, RuntimeEvent, RuntimeHooks, RuntimeSettingsProvider } from "../adapter.js";
 import { findExecutable, runCli } from "../cli.js";
 import { changedFiles, diffSinceSnapshot, snapshotWorkspace } from "../git-snapshot.js";
 import { Transcript, titleFromPrompt, type RuntimeStorage } from "../transcript.js";
@@ -21,6 +21,14 @@ const SANDBOX_NOTE =
   "When a command fails only because of the sandbox, rerun it with escalated permissions and a one-line justification; Peer asks the developer. Do not report work as tested if its tests could not run.";
 const SANDBOX_NOTE_NETWORK =
   "Sandbox: your commands may use the network, including opening local ports. If a command still fails only because of the sandbox, rerun it with escalated permissions and a one-line justification; Peer asks the developer. Do not report work as tested if its tests could not run.";
+/**
+ * Gated turns cannot change code, and MCP tools are not gated per call by the protocol, so the
+ * model is told up front not to start any: Peer stops a turn whose MCP call starts while locked.
+ * (When Codex asks first with `item/mcpToolCall/requestApproval`, that goes through the gate
+ * and the developer instead.)
+ */
+export const MCP_LOCKED_NOTE =
+  `MCP tools are locked too: do not call any MCP tool while code changes are locked. Peer stops a turn that starts one. If an MCP tool is the right next step, ask the developer with the ${CHECKPOINT_TOOL} tool first.`;
 
 /**
  * `turn/start` parameters. Codex fixes the sandbox for the whole turn: read-only when the turn
@@ -30,11 +38,12 @@ const SANDBOX_NOTE_NETWORK =
 export function turnStartParams(threadId: string, input: PromptInput, model: string | undefined) {
   const writable = input.gate === "open";
   const network = writable && input.network === true;
+  const policy = writable ? input.system : `${input.system}\n\n${MCP_LOCKED_NOTE}`;
   return {
     threadId,
     // developerInstructions are fixed per thread, so the per-turn policy travels with the input.
     input: [
-      { type: "text", text: `<peer_collaboration_policy>\n${input.system}\n\n${network ? SANDBOX_NOTE_NETWORK : SANDBOX_NOTE}\n</peer_collaboration_policy>`, text_elements: [] },
+      { type: "text", text: `<peer_collaboration_policy>\n${policy}\n\n${network ? SANDBOX_NOTE_NETWORK : SANDBOX_NOTE}\n</peer_collaboration_policy>`, text_elements: [] },
       { type: "text", text: input.text, text_elements: [] },
     ],
     approvalPolicy: "untrusted",
@@ -42,6 +51,8 @@ export function turnStartParams(threadId: string, input: PromptInput, model: str
       ? { type: "workspaceWrite", writableRoots: [], networkAccess: network, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
       : { type: "readOnly", networkAccess: false },
     model,
+    // The protocol takes any non-empty effort string; omit it for the account default.
+    ...(input.effort ? { effort: input.effort } : {}),
   };
 }
 
@@ -91,13 +102,35 @@ export interface CodexAdapterOptions {
   binary?: string;
   version: string;
   log: (line: string) => void;
+  /** Live runtime settings; `codexBin` there overrides `binary` (a restart picks it up). */
+  settings?: RuntimeSettingsProvider;
 }
+
+/**
+ * One Peer turn's Codex turn, for undo: when Peer prompted (adapter clock, so it compares with
+ * the engine's `since`) and the Codex turn id (`thread/revert beforeTurnId` drops it and every
+ * later turn from the thread's durable history).
+ */
+export interface CodexTurnRecord {
+  t: number;
+  id: string;
+}
+
+/** The Codex turn undo drops first, or null when the thread holds nothing Peer started after `since`. */
+export function revertTarget(turns: CodexTurnRecord[], since: number): string | null {
+  return turns.find((r) => r.t >= since)?.id ?? null;
+}
+
+/** Turn records Peer keeps per session (capped; each undo prunes the undone ones). */
+const MAX_TURN_RECORDS = 200;
 
 interface SessionState {
   /** Codex thread, created on the first prompt (a thread without turns cannot be resumed later). */
   threadId?: string;
   baseline?: string | null;
   titled?: boolean;
+  /** Codex turn ids of past turns, oldest first. */
+  turns?: CodexTurnRecord[];
 }
 
 interface PendingApproval {
@@ -117,6 +150,8 @@ interface Run {
   sessionId: string;
   threadId: string;
   directory: string;
+  /** Adapter clock when Peer prompted, for undo mapping. */
+  promptedAt: number;
   turnId: string | null;
   /** Assistant message for this turn (one per Codex turn). */
   messageId: string;
@@ -215,7 +250,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
   async start(): Promise<void> {
     this.stopped = false;
     this.setStatus({ state: "starting" });
-    this.binary = findExecutable("codex", this.opts.env, this.opts.binary);
+    this.binary = findExecutable("codex", this.opts.env, this.opts.settings?.().codexBin ?? this.opts.binary ?? undefined);
     if (!this.binary) {
       this.setStatus({ state: "unavailable", error: "Codex is not installed (no `codex` on PATH). Install the Codex CLI, run `codex login`, then restart this runtime." });
       return;
@@ -356,13 +391,26 @@ export class CodexAdapter implements AgentRuntimeAdapter {
   }
 
   /**
-   * Undo drops the turns from Peer's transcript. The CLI's own session keeps them, so the agent
-   * still remembers that work and is told on its next turn that it was undone.
+   * Undo reverts the thread too (`thread/revert` drops the first undone turn and every later
+   * one from its durable history; Peer's files are already back). When the turns cannot be
+   * mapped or the revert fails, they stay in the thread and the agent is told on its next turn
+   * instead.
    */
   async forgetTurns(_directory: string, sessionId: string, since: number): Promise<boolean> {
     if (this.runs.has(sessionId)) throw new Error("The agent is still working on this session.");
     this.transcript(sessionId).dropSince(since);
-    return false;
+    const { threadId, turns = [] } = this.state(sessionId);
+    if (!threadId) return true;
+    const beforeTurnId = revertTarget(turns, since);
+    if (!beforeTurnId) return false;
+    try {
+      await this.client().call("thread/revert", { threadId, beforeTurnId });
+      this.saveState(sessionId, { turns: turns.filter((r) => r.t < since) });
+      return true;
+    } catch (err) {
+      this.opts.log(`[codex] thread/revert for undo failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
   }
 
   async getParentSessionId(): Promise<string | null> {
@@ -405,8 +453,16 @@ export class CodexAdapter implements AgentRuntimeAdapter {
     return threadId;
   }
 
+  /** Remember a Codex turn id for undo, once per turn. */
+  private recordTurnId(sessionId: string, t: number, id: string | null | undefined) {
+    if (!id) return;
+    const turns = (this.state(sessionId).turns ?? []).filter((r) => r.id !== id);
+    this.saveState(sessionId, { turns: [...turns, { t, id }].slice(-MAX_TURN_RECORDS) });
+  }
+
   async prompt(directory: string, sessionId: string, input: PromptInput): Promise<void> {
     if (this.runs.has(sessionId)) throw new Error("Codex is still working on this session.");
+    const promptedAt = Date.now();
     const model = input.model?.modelId || undefined;
     const threadId = await this.ensureThread(directory, sessionId, model);
     const state = this.state(sessionId);
@@ -422,6 +478,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
       sessionId,
       threadId,
       directory,
+      promptedAt,
       turnId: null,
       messageId: `turn_${randomUUID()}`,
       abort: new AbortController(),
@@ -441,6 +498,7 @@ export class CodexAdapter implements AgentRuntimeAdapter {
     try {
       const res = await this.client().call<{ turn: { id: string } }>("turn/start", turnStartParams(threadId, input, model));
       run.turnId ??= res.turn.id;
+      this.recordTurnId(sessionId, promptedAt, res.turn.id);
     } catch (err) {
       this.endRun(run, err instanceof Error ? err.message : String(err), true);
       throw err;
@@ -563,9 +621,12 @@ export class CodexAdapter implements AgentRuntimeAdapter {
     if (typeof params.turnId === "string" && run.turnId && params.turnId !== run.turnId) return;
     const transcript = this.transcript(run.sessionId);
     switch (method) {
-      case "turn/started":
-        run.turnId ??= (params.turn as { id?: string } | undefined)?.id ?? null;
+      case "turn/started": {
+        const startedId = (params.turn as { id?: string } | undefined)?.id ?? null;
+        run.turnId ??= startedId;
+        this.recordTurnId(run.sessionId, run.promptedAt, startedId);
         return;
+      }
       case "item/started":
       case "item/completed": {
         const item = params.item as CodexItem | undefined;
@@ -624,6 +685,11 @@ export class CodexAdapter implements AgentRuntimeAdapter {
         case "item/fileChange/requestApproval":
         case "item/permissions/requestApproval":
           return await this.approve(rpc, run, req);
+        case "item/mcpToolCall/requestApproval":
+          // If Codex ever asks before running an MCP tool, that is the pre-execution gate.
+          // Codex 0.166.0 has no such method in its protocol schema, so in practice MCP
+          // calls just start (item/started), which stays on the fail-closed abort below.
+          return await this.approveMcp(rpc, run, req);
         case "item/tool/requestUserInput":
           return rpc.respondError(req.id, `Ask the developer with the ${CHECKPOINT_TOOL} tool instead.`);
         case "mcpServer/elicitation/request":
@@ -707,13 +773,47 @@ export class CodexAdapter implements AgentRuntimeAdapter {
     this.emit({ type: "permission.asked", request });
   }
 
+  /** The MCP tool an approval request or item names, and the arguments it would run with. */
+  private mcpCall(params: Record<string, unknown>): { server: string; tool: string; args: unknown } {
+    const item = params.item && typeof params.item === "object" ? (params.item as Record<string, unknown>) : params;
+    const server = String(item.server ?? params.server ?? "");
+    const tool = String(item.tool ?? params.tool ?? "");
+    const args = (item.arguments ?? params.arguments ?? {}) as unknown;
+    return { server, tool, args };
+  }
+
   /**
-   * Codex runs MCP tools without asking its client, so Peer cannot stop one beforehand. If one
-   * starts while the gate is locked, Peer stops the turn and says so (fail closed, after the fact).
+   * Pre-execution gate for MCP tools, when Codex asks first. The gate decides whether the call
+   * may run at all; the developer decides the rest, like any other approval.
+   */
+  private async approveMcp(rpc: CodexRpc, run: Run | undefined, req: RpcRequest) {
+    const p = req.params;
+    if (!run) return rpc.respond(req.id, approvalResponse(req.method, p, "reject", true));
+    const { server, tool, args } = this.mcpCall(p);
+    const name = `${server}_${tool}`;
+    const gate = await this.opts.hooks.checkTool(run.sessionId, name, args, run.abort.signal);
+    if (!gate.allow) return this.decline(rpc, run, req, gate.reason, gate.explain);
+    const request: PermissionRequest = {
+      id: `perm_${randomUUID()}`,
+      sessionId: run.sessionId,
+      permission: "mcp",
+      patterns: [`${server}: ${tool}`],
+      metadata: { reason: "MCP tool call", method: req.method, server, tool, arguments: args },
+    };
+    run.approvals.set(request.id, { request, rpcId: req.id, method: req.method, params: p });
+    this.emit({ type: "permission.asked", request });
+  }
+
+  /**
+   * Codex 0.166.0 runs MCP tools without asking its client (no
+   * `item/mcpToolCall/requestApproval` in its protocol schema), so Peer cannot stop one
+   * beforehand. If one starts while the gate is locked, Peer stops the turn and says so (fail
+   * closed, after the fact). Gated turns are also told up front not to start any
+   * (MCP_LOCKED_NOTE).
    */
   private async checkMcpCall(run: Run, item: CodexItem) {
     const tool = `${String(item.server)}_${String(item.tool)}`;
-    const gate = await this.opts.hooks.checkTool(run.sessionId, tool, item.arguments ?? {});
+    const gate = await this.opts.hooks.checkTool(run.sessionId, tool, item.arguments ?? {}, run.abort.signal);
     if (gate.allow || this.runs.get(run.sessionId) !== run) return;
     const reason = `${gate.reason} Codex runs MCP tools without asking Peer first, so Peer stopped this turn.`;
     run.declined.set(item.id, reason);

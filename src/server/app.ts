@@ -6,16 +6,19 @@ import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import {
   CHECKPOINT_ACTIONS,
+  CLAUDE_PERMISSION_MODES,
   COLLABORATION_MODES,
   isPrimaryMode,
   TURN_INTENTS,
   type CheckpointAction,
+  type ClaudePermissionMode,
   type CollaborationModeId,
   type LocalServerKind,
   type RuntimeKind,
   type ModelRef,
   type PeerEvent,
   type PermissionReply,
+  type RuntimeSettings,
   type TurnIntent,
 } from "../shared/types.js";
 import { EngineError } from "./collaboration/engine.js";
@@ -62,6 +65,40 @@ function fail(c: Context, err: unknown) {
 
 const isMode = (m: unknown): m is CollaborationModeId => COLLABORATION_MODES.includes(m as CollaborationModeId);
 const isIntent = (i: unknown): i is TurnIntent => TURN_INTENTS.includes(i as TurnIntent);
+
+/**
+ * Merge validated runtime settings over the stored ones (the UI sends the whole form, but
+ * unknown keys and wrong types are refused rather than stored).
+ */
+export function normalizeRuntimeSettings(v: unknown, previous?: RuntimeSettings): RuntimeSettings {
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("runtimeSettings must be an object");
+  const base: RuntimeSettings = previous ?? { claudeBin: null, codexBin: null, geminiBin: null, claudePermissionMode: "acceptEdits", codexEffort: null };
+  const next: RuntimeSettings = { ...base };
+  const bin = (key: "claudeBin" | "codexBin" | "geminiBin") => {
+    const raw = (v as Record<string, unknown>)[key];
+    if (raw === undefined) return;
+    if (raw !== null && typeof raw !== "string") throw new Error(`${key} must be a path string or null`);
+    const trimmed = typeof raw === "string" ? raw.trim() : "";
+    if (trimmed.length > 1024) throw new Error(`${key} is too long`);
+    next[key] = trimmed ? trimmed : null;
+  };
+  bin("claudeBin");
+  bin("codexBin");
+  bin("geminiBin");
+  const mode = (v as Record<string, unknown>).claudePermissionMode;
+  if (mode !== undefined) {
+    if (!CLAUDE_PERMISSION_MODES.includes(mode as ClaudePermissionMode)) throw new Error("claudePermissionMode must be acceptEdits or auto");
+    next.claudePermissionMode = mode as ClaudePermissionMode;
+  }
+  const effort = (v as Record<string, unknown>).codexEffort;
+  if (effort !== undefined) {
+    if (effort !== null && typeof effort !== "string") throw new Error("codexEffort must be a string or null");
+    const trimmed = typeof effort === "string" ? effort.trim() : "";
+    if (trimmed.length > 64) throw new Error("codexEffort is too long");
+    next.codexEffort = trimmed ? trimmed : null;
+  }
+  return next;
+}
 
 /** Answers to a login method's prompts: a flat string map. */
 function parseInputs(v: unknown): Record<string, string> | null {
@@ -168,7 +205,7 @@ export function createApp(deps: AppDeps): Hono {
   api.get("/policies", (c) => c.json(POLICIES));
   api.get("/preferences", (c) => c.json(service.preferences()));
   api.patch("/preferences", async (c) => {
-    const body = await c.req.json<{ defaultMode?: unknown; defaultRuntime?: unknown; lastSessionId?: unknown }>();
+    const body = await c.req.json<{ defaultMode?: unknown; defaultRuntime?: unknown; lastSessionId?: unknown; runtimeSettings?: unknown }>();
     if (body.defaultMode !== undefined && !isMode(body.defaultMode)) return c.json({ error: "Unknown mode" }, 400);
     if (body.defaultMode !== undefined && !isPrimaryMode(body.defaultMode)) return c.json({ error: "Focus is retired as a default; use collaborate or learn." }, 400);
     if (body.defaultRuntime !== undefined && (typeof body.defaultRuntime !== "string" || !service.runtimes.has(body.defaultRuntime))) {
@@ -177,10 +214,19 @@ export function createApp(deps: AppDeps): Hono {
     if (body.lastSessionId !== undefined && body.lastSessionId !== null && typeof body.lastSessionId !== "string") {
       return c.json({ error: "Invalid lastSessionId" }, 400);
     }
+    let runtimeSettings: RuntimeSettings | undefined;
+    if (body.runtimeSettings !== undefined) {
+      try {
+        runtimeSettings = normalizeRuntimeSettings(body.runtimeSettings, service.store.getPreferences().runtimeSettings);
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+      }
+    }
     service.store.setPreferences({
       defaultMode: body.defaultMode as CollaborationModeId | undefined,
       defaultRuntime: body.defaultRuntime as RuntimeKind | undefined,
       lastSessionId: body.lastSessionId as string | null | undefined,
+      runtimeSettings,
     });
     return c.json(service.preferences());
   });

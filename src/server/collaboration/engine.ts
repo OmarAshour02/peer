@@ -374,6 +374,8 @@ export class CollaborationEngine {
         autoApprovals: session.autoApprovals,
         // Peer checkpoints replace the runtime's generic question tool.
         tools: { question: false },
+        // Codex reasoning effort from Runtime settings; other runtimes ignore it.
+        effort: session.runtime === "codex" ? (this.store.getPreferences().runtimeSettings.codexEffort || undefined) : undefined,
       });
     } catch (err) {
       if (untold > 0) this.store.addUndoneUntold(session.id, untold);

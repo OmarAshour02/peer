@@ -12,9 +12,13 @@ import type {
   PermissionRequest,
   ProviderCatalog,
   RuntimeKind,
+  RuntimeSettings,
   RuntimeStatus,
   SessionRunStatus,
 } from "../../shared/types.js";
+
+/** Live CLI runtime settings (paths, permission mode, effort); adapters read them per use. */
+export type RuntimeSettingsProvider = () => RuntimeSettings;
 
 /**
  * The boundary between Peer and the coding-agent runtime. The collaboration engine and the
@@ -132,6 +136,8 @@ export interface PromptInput {
   autoApprovals?: boolean;
   /** Tools to enable/disable for this turn. */
   tools?: Record<string, boolean>;
+  /** Reasoning effort for runtimes that take one (Codex `turn/start effort`). */
+  effort?: string | null;
 }
 
 /** Runtime events, already normalized into Peer shapes. */

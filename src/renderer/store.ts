@@ -42,6 +42,8 @@ interface PeerState {
   providersOpen: boolean;
   /** Bumped when a runtime's providers change, so an open dialog reloads them. */
   providersVersion: number;
+  /** The "Runtime settings" dialog (CLI paths, permission mode, effort). */
+  settingsOpen: boolean;
 
   init(api: PeerApi): Promise<void>;
   selectWorkspace(id: string | null): Promise<void>;
@@ -55,6 +57,7 @@ interface PeerState {
   setError(error: string | null): void;
   setNotice(notice: string | null): void;
   setProvidersOpen(open: boolean): void;
+  setSettingsOpen(open: boolean): void;
 }
 
 function upsertPart(messages: PeerMessage[], messageId: string, part: PeerPart): PeerMessage[] {
@@ -68,7 +71,7 @@ function upsertPart(messages: PeerMessage[], messageId: string, part: PeerPart):
   return messages.map((m, i) => (i === idx ? { ...msg, parts } : m));
 }
 
-const RUNTIME_ORDER: RuntimeKind[] = ["opencode", "claude", "codex"];
+const RUNTIME_ORDER: RuntimeKind[] = ["opencode", "claude", "codex", "gemini"];
 const byKind = (a: RuntimeInfo, b: RuntimeInfo) => RUNTIME_ORDER.indexOf(a.kind) - RUNTIME_ORDER.indexOf(b.kind);
 
 function upsertCheckpoint(list: Checkpoint[], cp: Checkpoint): Checkpoint[] {
@@ -106,6 +109,7 @@ export const usePeer = create<PeerState>((set, get) => ({
   notice: null,
   providersOpen: false,
   providersVersion: 0,
+  settingsOpen: false,
 
   async init(api) {
     set({ api });
@@ -193,6 +197,10 @@ export const usePeer = create<PeerState>((set, get) => ({
 
   setProvidersOpen(open) {
     set({ providersOpen: open });
+  },
+
+  setSettingsOpen(open) {
+    set({ settingsOpen: open });
   },
 
   handleEvent(event) {
