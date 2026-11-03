@@ -4,7 +4,7 @@
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/server/app.js";
 import { CONTINUATION_TEXT, DECISION_DECLINE } from "../src/server/collaboration/engine.js";
 import { isGoAhead, parseIntent } from "../src/server/collaboration/intent.js";
@@ -352,6 +352,189 @@ describe("Collaborate approach gate", () => {
     const ok = await patch({ approachGate: true });
     expect(ok.status).toBe(200);
     expect(((await ok.json()) as PeerSession).approachGate).toBe(true);
+  });
+});
+
+describe("adaptive policy across sessions", () => {
+  async function handsOffSession() {
+    const a = await newSession("collaborate");
+    await service.send(a.id, "task one", "delegate");
+    idle(a);
+    await service.send(a.id, "task two", "delegate");
+    idle(a);
+    return a;
+  }
+
+  it("two hands-off responses narrow the questions in a brand-new session", async () => {
+    await handsOffSession();
+    const b = await newSession("collaborate");
+    await service.send(b.id, "task");
+    const q = await ask(b, "tradeoff", "Weak or strong?");
+    expect(q.checkpoint!.status).toBe("auto_resolved");
+    expect(q.output).toMatch(/handed their last decisions back/);
+    // Engaging in the new session restores the default there.
+    const r = await ask(b, "requirement", "Which clients?");
+    await resolve(r.checkpoint!.id, "answer", { text: "All of them" });
+    const t = await ask(b, "tradeoff", "Weak or strong?");
+    expect(t.checkpoint!.status).toBe("pending");
+  });
+
+  it("with cross-session memory off, a new session is fresh whatever happened elsewhere", async () => {
+    await handsOffSession();
+    store.setPreferences({ crossSessionMemory: false });
+    const b = await newSession("collaborate");
+    await service.send(b.id, "task");
+    expect((await ask(b, "tradeoff", "Weak or strong?")).checkpoint!.status).toBe("pending");
+  });
+
+  it("reset makes a new session fresh until new history forms", async () => {
+    await handsOffSession();
+    store.setPreferences({ memoryResetAt: Date.now() + 60_000 });
+    const b = await newSession("collaborate");
+    await service.send(b.id, "task");
+    expect((await ask(b, "tradeoff", "Weak or strong?")).checkpoint!.status).toBe("pending");
+  });
+
+  it("new sessions preselect the recent mode and model habits; explicit choices win", async () => {
+    const a = await newSession("learn");
+    service.updateSession(a.id, { model: { providerId: "anthropic", modelId: "claude-x" } });
+    const b = await newSession();
+    expect(b.mode).toBe("learn");
+    expect(b.model).toEqual({ providerId: "anthropic", modelId: "claude-x" });
+    const c = await newSession("collaborate");
+    expect(c.mode).toBe("collaborate");
+    // An explicitly set default mode beats the habit.
+    store.setPreferences({ defaultMode: "collaborate" });
+    const d = await newSession();
+    expect(d.mode).toBe("collaborate");
+  });
+
+  it("ordinary tool activity does not evict the remembered responses", async () => {
+    const a = await handsOffSession();
+    // 201 allowed edits in a fresh delegated task flood the event log with non-response events.
+    await service.send(a.id, "task three", "delegate");
+    for (let i = 0; i < 201; i++) await write(a);
+    const b = await newSession("collaborate");
+    await service.send(b.id, "task");
+    expect((await ask(b, "tradeoff", "Weak or strong?")).checkpoint!.status).toBe("auto_resolved");
+  });
+
+  it("renaming a pre-reset session does not resurrect its habits", async () => {
+    const a = await newSession("learn");
+    service.updateSession(a.id, { model: { providerId: "anthropic", modelId: "old-model" } });
+    store.setPreferences({ memoryResetAt: Date.now() });
+    await new Promise((r) => setTimeout(r, 5));
+    service.updateSession(a.id, { title: "renamed" });
+    const b = await newSession();
+    expect(b.mode).toBe("collaborate");
+    expect(b.model).toBeNull();
+  });
+
+  it("an explicit null model wins over the remembered model, and choosing the default updates the habit", async () => {
+    const a = await newSession("collaborate");
+    service.updateSession(a.id, { model: { providerId: "anthropic", modelId: "old-model" } });
+    const explicit = await service.createSession(a.workspaceId, { model: null });
+    expect(explicit.model).toBeNull();
+    const newer = await newSession("collaborate");
+    service.updateSession(newer.id, { model: null });
+    const c = await newSession();
+    expect(c.model).toBeNull();
+  });
+
+  it("sessions from before choice events existed still seed the model habit", async () => {
+    const a = await newSession("learn");
+    service.updateSession(a.id, { model: { providerId: "anthropic", modelId: "old-model" } });
+    // The pre-upgrade shape: models lived only in session rows; session.created had no model
+    // field and there were no session.model events.
+    store.db.exec("DELETE FROM collaboration_events WHERE type = 'session.model'");
+    store.db.exec(`UPDATE collaboration_events SET payload = '{"mode":"learn","runtime":"opencode"}' WHERE type = 'session.created'`);
+    const b = await newSession();
+    expect(b.mode).toBe("learn");
+    expect(b.model).toEqual({ providerId: "anthropic", modelId: "old-model" });
+  });
+
+  it("a model changed in an older legacy session beats a newer session's stale model", async () => {
+    const a = await newSession("collaborate");
+    await new Promise((r) => setTimeout(r, 5));
+    const b = await newSession("collaborate");
+    service.updateSession(b.id, { model: { providerId: "anthropic", modelId: "stale" } });
+    service.updateSession(a.id, { model: { providerId: "anthropic", modelId: "latest" } });
+    // Pre-upgrade shape again: no model choice events, models only in session rows.
+    store.db.exec("DELETE FROM collaboration_events WHERE type = 'session.model'");
+    store.db.exec(`UPDATE collaboration_events SET payload = '{"mode":"collaborate","runtime":"opencode"}' WHERE type = 'session.created'`);
+    const c = await newSession();
+    expect(c.model).toEqual({ providerId: "anthropic", modelId: "latest" });
+  });
+
+  it("a retired Focus choice does not erase the recent primary-mode habit", async () => {
+    await newSession("learn");
+    await newSession("focus");
+    const b = await newSession();
+    expect(b.mode).toBe("learn");
+  });
+
+  it("the remembered responses are found past newer non-response activity", async () => {
+    const a = await handsOffSession();
+    // Newer events that are not responses (Peer-held questions) must not hide the last responses.
+    for (let i = 0; i < 120; i++) store.logEvent(a.id, "checkpoint.resolved", { checkpointId: "cp_missing", action: "answer" });
+    const b = await newSession("collaborate");
+    await service.send(b.id, "task");
+    expect((await ask(b, "tradeoff", "Weak or strong?")).checkpoint!.status).toBe("auto_resolved");
+  });
+
+  it("the tendency check does bounded work however much non-qualifying history exists", async () => {
+    const a = await handsOffSession();
+    for (let i = 0; i < 1000; i++) store.logEvent(a.id, "checkpoint.resolved", { checkpointId: "cp_missing", action: "answer" });
+    const spy = vi.spyOn(store, "listRecentResponseEvents");
+    const b = await newSession("collaborate");
+    await service.send(b.id, "task");
+    expect((await ask(b, "tradeoff", "Weak or strong?")).checkpoint!.status).toBe("auto_resolved");
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(2);
+    spy.mockRestore();
+  });
+
+  it("reset during a pending session creation does not resurrect old habits", async () => {
+    const a = await newSession("learn");
+    service.updateSession(a.id, { model: { providerId: "anthropic", modelId: "old-model" } });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const original = runtime.createSession.bind(runtime);
+    runtime.createSession = async () => {
+      await gate;
+      return original();
+    };
+    const creating = service.createSession(a.workspaceId, {});
+    store.setPreferences({ memoryResetAt: Date.now() });
+    release();
+    const created = await creating;
+    expect(created.mode).toBe("collaborate");
+    expect(created.model).toBeNull();
+    const next = await newSession();
+    expect(next.mode).toBe("collaborate");
+    expect(next.model).toBeNull();
+  });
+
+  it("history recorded immediately after a reset counts", async () => {
+    await handsOffSession();
+    store.setPreferences({ memoryResetAt: Date.now() });
+    const a = await newSession("learn");
+    service.updateSession(a.id, { model: { providerId: "anthropic", modelId: "new-model" } });
+    const b = await newSession();
+    expect(b.mode).toBe("learn");
+    expect(b.model).toEqual({ providerId: "anthropic", modelId: "new-model" });
+  });
+
+  it("habits do not form with memory off or before the reset watermark", async () => {
+    const a = await newSession("learn");
+    service.updateSession(a.id, { model: { providerId: "anthropic", modelId: "claude-x" } });
+    store.setPreferences({ memoryResetAt: Date.now() + 60_000 });
+    const b = await newSession();
+    expect(b.mode).toBe("collaborate");
+    expect(b.model).toBeNull();
+    store.setPreferences({ memoryResetAt: 0, crossSessionMemory: false });
+    const c = await newSession();
+    expect(c.mode).toBe("collaborate");
+    expect(c.model).toBeNull();
   });
 });
 

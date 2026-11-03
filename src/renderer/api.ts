@@ -102,7 +102,7 @@ export class PeerApi {
     this.request<ProviderCatalog>("POST", `/runtimes/${kind}/local-servers`, input);
   removeLocalServer = (kind: RuntimeKind, id: string) => this.request<ProviderCatalog>("DELETE", `/runtimes/${kind}/local-servers/${encodeURIComponent(id)}`);
   preferences = () => this.request<Preferences>("GET", "/preferences");
-  setPreferences = (prefs: Partial<Preferences>) => this.request<Preferences>("PATCH", "/preferences", prefs);
+  setPreferences = (prefs: Partial<Preferences> & { resetMemory?: boolean }) => this.request<Preferences>("PATCH", "/preferences", prefs);
   workspaces = () => this.request<Workspace[]>("GET", "/workspaces");
   addWorkspace = (path: string) => this.request<Workspace>("POST", "/workspaces", { path });
   removeWorkspace = (id: string) => this.request("DELETE", `/workspaces/${id}`);

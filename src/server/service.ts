@@ -80,11 +80,27 @@ export class PeerService {
   ): Promise<PeerSession> {
     const ws = this.store.getWorkspace(workspaceId);
     if (!ws) throw new EngineError("Unknown workspace", 404);
-    const prefs = this.preferences();
-    const runtime = this.requireRuntime(input.runtime ?? prefs.defaultRuntime);
+    const initialPrefs = this.preferences();
+    const runtime = this.requireRuntime(input.runtime ?? initialPrefs.defaultRuntime);
     const runtimeSession = await runtime.createSession(ws.path, {});
+    // Memory preferences are re-read after the await: a reset (or switching memory off) that
+    // landed while the runtime created the session must not be resurrected by this creation.
+    const prefs = this.preferences();
+    // Cross-session habits (memory on, since the reset watermark), derived from the events that
+    // record actual mode/model choices — never from unrelated session updates like a rename.
+    // Explicit choices always win, including an explicitly set default mode and an explicit
+    // null model (the runtime default).
+    let habitMode: CollaborationModeId | undefined;
+    let habitModel: ModelRef | null = null;
+    if (prefs.crossSessionMemory) {
+      // Each habit is one bounded query at the latest choice event, Focus choices excluded there.
+      const modeChoice = this.store.latestModeChoice(prefs.memoryResetEventId);
+      if (modeChoice) habitMode = (modeChoice.mode ?? modeChoice.to) as CollaborationModeId;
+      const modelChoice = this.store.latestModelChoice(prefs.memoryResetEventId, runtime.kind);
+      habitModel = modelChoice ? ((modelChoice.model as ModelRef | null) ?? null) : (this.store.latestSessionByRuntime(runtime.kind, prefs.memoryResetAt)?.model ?? null);
+    }
     // Focus is retired: asked for explicitly it still works, but it is never the default.
-    const mode = input.mode ?? (isPrimaryMode(prefs.defaultMode) ? prefs.defaultMode : DEFAULT_MODE);
+    const mode = input.mode ?? (this.store.defaultModeExplicit() || !habitMode ? (isPrimaryMode(prefs.defaultMode) ? prefs.defaultMode : DEFAULT_MODE) : habitMode);
     // Asking for another runtime than the default is a choice; using the default is not.
     if (input.runtime && input.runtime !== prefs.defaultRuntime) this.store.setPreferences({ defaultRuntime: input.runtime });
     const session = this.store.createSession({
@@ -93,9 +109,9 @@ export class PeerService {
       runtimeSessionId: runtimeSession.id,
       title: DEFAULT_TITLE,
       mode,
-      model: input.model ?? null,
+      model: input.model === undefined ? habitModel : input.model,
     });
-    this.store.logEvent(session.id, "session.created", { mode, runtime: runtime.kind });
+    this.store.logEvent(session.id, "session.created", { mode, runtime: runtime.kind, model: session.model });
     this.store.touchWorkspace(workspaceId);
     this.hub.emit({ type: "session.updated", session });
     return session;
@@ -114,7 +130,10 @@ export class PeerService {
       if (!title) throw new EngineError("A session name cannot be empty.");
       session = this.store.renameSession(sessionId, title.slice(0, 200));
     }
-    if (patch.model !== undefined) session = this.store.updateSession(sessionId, { model: patch.model });
+    if (patch.model !== undefined) {
+      session = this.store.updateSession(sessionId, { model: patch.model });
+      this.store.logEvent(sessionId, "session.model", { runtime: session.runtime, model: patch.model });
+    }
     if (patch.autoApprovals !== undefined && patch.autoApprovals !== session.autoApprovals) {
       session = this.store.updateSession(sessionId, { autoApprovals: patch.autoApprovals });
       this.store.logEvent(sessionId, "auto_approvals.changed", { on: patch.autoApprovals });

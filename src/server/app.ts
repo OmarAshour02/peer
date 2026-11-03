@@ -205,9 +205,11 @@ export function createApp(deps: AppDeps): Hono {
   api.get("/policies", (c) => c.json(POLICIES));
   api.get("/preferences", (c) => c.json(service.preferences()));
   api.patch("/preferences", async (c) => {
-    const body = await c.req.json<{ defaultMode?: unknown; defaultRuntime?: unknown; lastSessionId?: unknown; runtimeSettings?: unknown }>();
+    const body = await c.req.json<{ defaultMode?: unknown; defaultRuntime?: unknown; lastSessionId?: unknown; runtimeSettings?: unknown; crossSessionMemory?: unknown; resetMemory?: unknown }>();
     if (body.defaultMode !== undefined && !isMode(body.defaultMode)) return c.json({ error: "Unknown mode" }, 400);
     if (body.defaultMode !== undefined && !isPrimaryMode(body.defaultMode)) return c.json({ error: "Focus is retired as a default; use collaborate or learn." }, 400);
+    if (body.crossSessionMemory !== undefined && typeof body.crossSessionMemory !== "boolean") return c.json({ error: "crossSessionMemory must be true or false" }, 400);
+    if (body.resetMemory !== undefined && typeof body.resetMemory !== "boolean") return c.json({ error: "resetMemory must be true or false" }, 400);
     if (body.defaultRuntime !== undefined && (typeof body.defaultRuntime !== "string" || !service.runtimes.has(body.defaultRuntime))) {
       return c.json({ error: "Unknown runtime" }, 400);
     }
@@ -227,6 +229,8 @@ export function createApp(deps: AppDeps): Hono {
       defaultRuntime: body.defaultRuntime as RuntimeKind | undefined,
       lastSessionId: body.lastSessionId as string | null | undefined,
       runtimeSettings,
+      crossSessionMemory: body.crossSessionMemory as boolean | undefined,
+      memoryResetAt: body.resetMemory === true ? Date.now() : undefined,
     });
     return c.json(service.preferences());
   });

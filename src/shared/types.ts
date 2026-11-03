@@ -403,6 +403,16 @@ export interface Preferences {
   lastSessionId: string | null;
   /** CLI runtime behavior, set in Runtime settings and applied when sessions start. */
   runtimeSettings: RuntimeSettings;
+  /**
+   * Adaptive policy across sessions: Peer's local memory of how the developer responds
+   * (hands-off tendency) and what they pick (mode/model habits), derived from stored history.
+   * On by default; nothing is collected beyond what Peer already stores, and nothing leaves the machine.
+   */
+  crossSessionMemory: boolean;
+  /** Only history after this time counts toward cross-session memory (the reset watermark). */
+  memoryResetAt: number;
+  /** The collaboration-event id at the last reset: event-derived memory counts only later events, even within the same millisecond. */
+  memoryResetEventId: number;
 }
 
 /** Claude Code's permission mode for turns without session auto-approvals. */

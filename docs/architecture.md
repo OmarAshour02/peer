@@ -134,4 +134,4 @@ Without secrets, CI builds unsigned apps and says so. When a certificate is pres
 - `decision.noted`, `decision.reused` (a detected decision recorded without asking, or one already decided)
 - `gate.blocked`, `mode.changed`, `permission.*`, `runtime.error`
 
-Together with the runtime transcript, this is the capture point for conversation-derived learning. See [roadmap.md](roadmap.md). No learning data model is built yet, on purpose.
+Together with the runtime transcript, this is the capture point for conversation-derived learning. See [roadmap.md](roadmap.md). No learning data model is built yet, on purpose. Cross-session adaptation derives from this log and the sessions table at read time (the last 20 hands-off signals and the recent mode/model habits since `preferences.memoryResetAt`, only while `crossSessionMemory` is on); no separate memory store exists.

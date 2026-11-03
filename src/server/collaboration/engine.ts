@@ -1308,30 +1308,57 @@ export class CollaborationEngine {
   }
 
   /**
-   * Whether the developer's last two responses in this session handed decisions back: a task sent
+   * Whether the developer's last two responses handed decisions back: a task sent
    * with "Just do it" or "Direct answer", or a question answered with Just do it, You decide or
    * Direct answer. Answering in their own words, choosing an option, discussing, asking for a hint
    * or proceeding after a discussion counts as engaging and resets it. Peer's own dependency questions do not count.
+   * With cross-session memory on (the default), the signal pool is the last 20 signals across all
+   * sessions since the reset watermark; with it off, only this session's signals count, as before.
    */
   private handsOff(sessionId: string): boolean {
     const undone = (turnId: unknown) => typeof turnId === "string" && (this.store.getTurn(turnId)?.undoneAt ?? null) !== null;
-    const signals: boolean[] = [];
-    // The event log is in order, so the latest two responses are the last two signals.
-    for (const e of this.store.listEvents(sessionId)) {
+    /** One event as a hands-off signal (true/false), or null when it is not a qualifying response. */
+    const signalOf = (e: { type: string; payload: Record<string, unknown> }): boolean | null => {
       if (e.type === "turn.started") {
-        if (e.payload.resume || e.payload.continuation || undone(e.payload.turnId)) continue;
+        if (e.payload.resume || e.payload.continuation || undone(e.payload.turnId)) return null;
         const intent = e.payload.intent as TurnIntent;
-        if (intent === "delegate" || intent === "answer") signals.push(true);
-        else if (intent === "discuss" || intent === "hint" || intent === "proceed") signals.push(false);
-      } else if (e.type === "checkpoint.resolved") {
+        if (intent === "delegate" || intent === "answer") return true;
+        if (intent === "discuss" || intent === "hint" || intent === "proceed") return false;
+        return null;
+      }
+      if (e.type === "checkpoint.resolved") {
         const cp = typeof e.payload.checkpointId === "string" ? this.store.getCheckpoint(e.payload.checkpointId) : null;
-        if (!cp || cp.source !== "agent" || undone(cp.turnId)) continue;
+        if (!cp || cp.source !== "agent" || undone(cp.turnId)) return null;
         const action = e.payload.action as CheckpointAction;
-        signals.push(action === "go" || action === "delegate" || action === "direct");
+        return action === "go" || action === "delegate" || action === "direct";
+      }
+      return null;
+    };
+    const prefs = this.store.getPreferences();
+    if (!prefs.crossSessionMemory) {
+      const signals: boolean[] = [];
+      for (const e of this.store.listEvents(sessionId)) {
+        const s = signalOf(e);
+        if (s !== null) signals.push(s);
+      }
+      const last = signals.slice(-2);
+      return last.length === 2 && last.every(Boolean);
+    }
+    // Cross-session: read qualifying response events backwards in bounded batches and stop as
+    // soon as the last two are known, so history size cannot grow the work per check.
+    const newest: boolean[] = [];
+    let beforeId: number | undefined;
+    while (newest.length < 2) {
+      const batch = this.store.listRecentResponseEvents(prefs.memoryResetEventId, 50, beforeId);
+      if (batch.length === 0) break;
+      beforeId = batch[batch.length - 1]!.id;
+      for (const e of batch) {
+        const s = signalOf(e);
+        if (s !== null) newest.push(s);
+        if (newest.length >= 2) break;
       }
     }
-    const last = signals.slice(-2);
-    return last.length === 2 && last.every(Boolean);
+    return newest.length === 2 && newest.every(Boolean);
   }
 
   private hintNumber(cp: Checkpoint): number {

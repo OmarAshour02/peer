@@ -527,6 +527,12 @@ export class Store {
       .map((r) => ({ type: String(r.type), payload: JSON.parse(String(r.payload)), createdAt: Number(r.created_at) }));
   }
 
+  /** The id of the newest collaboration event, or 0 when there are none (the reset watermark). */
+  currentEventId(): number {
+    const row = this.db.prepare("SELECT COALESCE(MAX(id), 0) AS max_id FROM collaboration_events").get();
+    return Number(row?.max_id ?? 0);
+  }
+
   // -- preferences -----------------------------------------------------------
 
   getPreferences(): Preferences {
@@ -543,7 +549,74 @@ export class Store {
       runtimeChosen: runtime && RUNTIME_KINDS.includes(runtime) ? runtime : null,
       lastSessionId: lastSessionId && this.getSession(lastSessionId) ? lastSessionId : null,
       runtimeSettings: { ...DEFAULT_RUNTIME_SETTINGS, ...((get("runtimeSettings") as Partial<RuntimeSettings> | undefined) ?? {}) },
+      crossSessionMemory: (get("crossSessionMemory") as boolean | undefined) ?? true,
+      memoryResetAt: (get("memoryResetAt") as number | undefined) ?? 0,
+      memoryResetEventId: (get("memoryResetEventId") as number | undefined) ?? 0,
     };
+  }
+
+  /**
+   * The newest qualifying response events after an event id, newest first. Qualifying is decided
+   * in the query — task intents (not ordinary or resumed turns, not undone turns) and resolutions
+   * of agent-asked checkpoints on live turns — so unrelated activity cannot grow the scan.
+   */
+  listRecentResponseEvents(sinceEventId: number, limit: number, beforeId?: number): { id: number; sessionId: string; type: string; payload: Record<string, unknown>; createdAt: number }[] {
+    const before = beforeId !== undefined ? " AND id < ?" : "";
+    return this.db
+      .prepare(
+        `SELECT id, session_id, type, payload, created_at FROM collaboration_events
+         WHERE id > ?${before} AND (
+           (type = 'turn.started' AND COALESCE(json_extract(payload, '$.resume'), 0) = 0 AND COALESCE(json_extract(payload, '$.continuation'), 0) = 0
+             AND json_extract(payload, '$.intent') IN ('delegate', 'answer', 'discuss', 'hint', 'proceed')
+             AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.id = json_extract(payload, '$.turnId') AND t.undone_at IS NOT NULL))
+           OR (type = 'checkpoint.resolved' AND EXISTS (
+             SELECT 1 FROM checkpoints cp WHERE cp.id = json_extract(payload, '$.checkpointId') AND cp.source = 'agent'
+               AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.id = cp.turn_id AND t.undone_at IS NOT NULL))))
+         ORDER BY id DESC LIMIT ?`,
+      )
+      .all(sinceEventId, ...(beforeId !== undefined ? [beforeId] : []), limit)
+      .map((r) => ({ id: Number(r.id), sessionId: String(r.session_id), type: String(r.type), payload: JSON.parse(String(r.payload)), createdAt: Number(r.created_at) }));
+  }
+
+  /** The latest primary-mode choice event after an event id (session creation or a mode change), or null. */
+  latestModeChoice(sinceEventId: number): Record<string, unknown> | null {
+    const row = this.db
+      .prepare(
+        `SELECT payload FROM collaboration_events WHERE id > ? AND (
+           (type = 'session.created' AND json_extract(payload, '$.mode') IN ('collaborate', 'learn'))
+           OR (type = 'mode.changed' AND json_extract(payload, '$.to') IN ('collaborate', 'learn')))
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(sinceEventId);
+    return row ? (JSON.parse(String(row.payload)) as Record<string, unknown>) : null;
+  }
+
+  /** The latest model choice event for a runtime after an event id (an explicit null counts), or null. */
+  latestModelChoice(sinceEventId: number, runtime: RuntimeKind): Record<string, unknown> | null {
+    const row = this.db
+      .prepare(
+        `SELECT payload FROM collaboration_events WHERE id > ? AND type IN ('session.created', 'session.model')
+           AND json_extract(payload, '$.runtime') = ? AND json_type(payload, '$.model') IS NOT NULL
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(sinceEventId, runtime);
+    return row ? (JSON.parse(String(row.payload)) as Record<string, unknown>) : null;
+  }
+
+  /**
+   * The legacy model habit on a runtime: among sessions created after a time (the reset watermark,
+   * so a later rename of a pre-reset session cannot make it eligible), the one most recently
+   * updated — a model changed in an older session after a newer one was created is the later
+   * choice. Used only for sessions created before model choices were recorded as events.
+   */
+  latestSessionByRuntime(runtime: RuntimeKind, since: number): PeerSession | null {
+    const rows = this.db.prepare("SELECT * FROM sessions WHERE runtime = ? AND created_at > ? ORDER BY updated_at DESC LIMIT 1").all(runtime, since);
+    return rows.length > 0 ? toSession(rows[0]!) : null;
+  }
+
+  /** Whether the developer explicitly set a default mode (an explicit choice beats the mode habit). */
+  defaultModeExplicit(): boolean {
+    return this.db.prepare("SELECT value FROM preferences WHERE key = 'defaultMode'").get() !== undefined;
   }
 
   setPreferences(prefs: Partial<Preferences>): Preferences {
@@ -552,6 +625,12 @@ export class Store {
     if (prefs.defaultRuntime) put.run("defaultRuntime", JSON.stringify(prefs.defaultRuntime));
     if (prefs.lastSessionId !== undefined) put.run("lastSessionId", JSON.stringify(prefs.lastSessionId));
     if (prefs.runtimeSettings) put.run("runtimeSettings", JSON.stringify({ ...DEFAULT_RUNTIME_SETTINGS, ...prefs.runtimeSettings }));
+    if (prefs.crossSessionMemory !== undefined) put.run("crossSessionMemory", JSON.stringify(prefs.crossSessionMemory));
+    if (prefs.memoryResetAt !== undefined) put.run("memoryResetAt", JSON.stringify(prefs.memoryResetAt));
+    // A reset also moves the event-id watermark to now, unless the caller set it explicitly:
+    // history in the same millisecond after the reset still counts.
+    if (prefs.memoryResetEventId !== undefined) put.run("memoryResetEventId", JSON.stringify(prefs.memoryResetEventId));
+    else if (prefs.memoryResetAt !== undefined) put.run("memoryResetEventId", JSON.stringify(this.currentEventId()));
     return this.getPreferences();
   }
 }
