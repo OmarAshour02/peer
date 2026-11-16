@@ -176,6 +176,8 @@ export async function runSmokeTest(peer: PeerServer, openWindow: () => BrowserWi
         selection: getComputedStyle(document.body, '::selection').backgroundColor,
       };
     })()`);
+    // Detach before the pixel checks: with the debugger attached, Linux (xvfb) captured a stale frame.
+    dbg.detach();
     if (before.bg !== "#090b09") throw new Error(`dark bg token: ${before.bg}`);
     if (before.accent !== "#86b985") throw new Error(`dark accent token: ${before.accent}`);
     if (before.composerShadow === "missing" || before.composerShadow === "none") throw new Error(`composer shadow: ${before.composerShadow}`);
