@@ -318,8 +318,10 @@ export async function runSmokeTest(peer: PeerServer, openWindow: () => BrowserWi
       const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
       set.call(input, 'smoke search');
       input.dispatchEvent(new Event('input', { bubbles: true }));
-      await wait(500);
-      out.filtered = [...dialog().querySelectorAll('[role="option"]')].map((o) => o.textContent).some((t) => t.includes('Smoke search target'));
+      // Results load asynchronously; slower CI runners (mac-x64) need more than a fixed delay.
+      const hasTarget = () => [...dialog().querySelectorAll('[role="option"]')].map((o) => o.textContent).some((t) => t.includes('Smoke search target'));
+      for (let i = 0; i < 20 && !hasTarget(); i++) await wait();
+      out.filtered = hasTarget();
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       for (let i = 0; i < 20 && document.querySelector('header .truncate')?.textContent !== 'Smoke search target'; i++) await wait();
       out.enterOpens = !dialog() && document.querySelector('header .truncate')?.textContent === 'Smoke search target';
