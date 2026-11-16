@@ -158,6 +158,12 @@ export async function runSmokeTest(peer: PeerServer, openWindow: () => BrowserWi
     if (!near(darkNavPx, [15, 18, 15])) throw new Error(`dark sidebar pixel: ${darkNavPx}`);
     const darkGround = await groundFraction([9, 11, 9]);
     if (darkGround < 0.8) throw new Error(`dark ground pixels: ${darkGround}`);
+    // Pin motion to "no-preference" so the check doesn't depend on the host's accessibility
+    // settings (CI macOS runners can have Reduce Motion on, which correctly stops the drift).
+    const dbg = win.webContents.debugger;
+    if (!dbg.isAttached()) dbg.attach("1.3");
+    await dbg.sendCommand("Emulation.setEmulatedMedia", { media: "", features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
+    await sleep(200);
     const before = await read(`(() => {
       const cs = getComputedStyle(document.documentElement);
       const composer = document.querySelector('.shadow-composer');
@@ -224,7 +230,6 @@ export async function runSmokeTest(peer: PeerServer, openWindow: () => BrowserWi
     if (scrollerFocus.present && scrollerFocus.focused && scrollerFocus.outlineStyle !== "none") throw new Error(`transcript shows a focus ring: ${JSON.stringify(scrollerFocus)}`);
 
     // Reduced motion must stop the constellation drift in the applied media query.
-    const dbg = win.webContents.debugger;
     try {
       if (!dbg.isAttached()) dbg.attach("1.3");
       await dbg.sendCommand("Emulation.setEmulatedMedia", { media: "", features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
