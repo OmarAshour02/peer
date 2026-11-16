@@ -205,10 +205,11 @@ export function createApp(deps: AppDeps): Hono {
   api.get("/policies", (c) => c.json(POLICIES));
   api.get("/preferences", (c) => c.json(service.preferences()));
   api.patch("/preferences", async (c) => {
-    const body = await c.req.json<{ defaultMode?: unknown; defaultRuntime?: unknown; lastSessionId?: unknown; runtimeSettings?: unknown; crossSessionMemory?: unknown; resetMemory?: unknown }>();
+    const body = await c.req.json<{ defaultMode?: unknown; defaultRuntime?: unknown; lastSessionId?: unknown; runtimeSettings?: unknown; crossSessionMemory?: unknown; resetMemory?: unknown; theme?: unknown }>();
     if (body.defaultMode !== undefined && !isMode(body.defaultMode)) return c.json({ error: "Unknown mode" }, 400);
     if (body.defaultMode !== undefined && !isPrimaryMode(body.defaultMode)) return c.json({ error: "Focus is retired as a default; use collaborate or learn." }, 400);
     if (body.crossSessionMemory !== undefined && typeof body.crossSessionMemory !== "boolean") return c.json({ error: "crossSessionMemory must be true or false" }, 400);
+    if (body.theme !== undefined && body.theme !== "dark" && body.theme !== "light") return c.json({ error: "theme must be dark or light" }, 400);
     if (body.resetMemory !== undefined && typeof body.resetMemory !== "boolean") return c.json({ error: "resetMemory must be true or false" }, 400);
     if (body.defaultRuntime !== undefined && (typeof body.defaultRuntime !== "string" || !service.runtimes.has(body.defaultRuntime))) {
       return c.json({ error: "Unknown runtime" }, 400);
@@ -231,6 +232,7 @@ export function createApp(deps: AppDeps): Hono {
       runtimeSettings,
       crossSessionMemory: body.crossSessionMemory as boolean | undefined,
       memoryResetAt: body.resetMemory === true ? Date.now() : undefined,
+      theme: body.theme as "dark" | "light" | undefined,
     });
     return c.json(service.preferences());
   });
@@ -253,9 +255,13 @@ export function createApp(deps: AppDeps): Hono {
       return fail(c, err);
     }
   });
-  api.delete("/workspaces/:id", (c) => {
-    service.store.removeWorkspace(c.req.param("id"));
-    return c.json({ ok: true });
+  api.delete("/workspaces/:id", async (c) => {
+    try {
+      await service.removeWorkspace(c.req.param("id"));
+      return c.json({ ok: true });
+    } catch (err) {
+      return fail(c, err);
+    }
   });
   api.get("/workspaces/:id/sessions", (c) => c.json(service.store.listSessions(c.req.param("id"))));
   api.post("/workspaces/:id/sessions", async (c) => {
@@ -359,6 +365,7 @@ export function createApp(deps: AppDeps): Hono {
     }),
   );
 
+  api.get("/sessions", (c) => c.json(service.store.searchSessions(c.req.query("q") ?? "")));
   api.get("/sessions/:id", (c) => {
     try {
       return c.json(service.snapshot(c.req.param("id")));
@@ -368,10 +375,11 @@ export function createApp(deps: AppDeps): Hono {
   });
   api.patch("/sessions/:id", async (c) => {
     try {
-      const body = await c.req.json<{ mode?: unknown; model?: unknown; title?: unknown; autoApprovals?: unknown; approachGate?: unknown; discussing?: unknown }>();
+      const body = await c.req.json<{ mode?: unknown; model?: unknown; title?: unknown; autoApprovals?: unknown; approachGate?: unknown; yolo?: unknown; discussing?: unknown }>();
       if (body.mode !== undefined && !isMode(body.mode)) return c.json({ error: "Unknown mode" }, 400);
       if (body.autoApprovals !== undefined && typeof body.autoApprovals !== "boolean") return c.json({ error: "autoApprovals must be true or false" }, 400);
       if (body.approachGate !== undefined && typeof body.approachGate !== "boolean") return c.json({ error: "approachGate must be true or false" }, 400);
+      if (body.yolo !== undefined && typeof body.yolo !== "boolean") return c.json({ error: "yolo must be true or false" }, 400);
       if (body.discussing !== undefined && typeof body.discussing !== "boolean") return c.json({ error: "discussing must be true or false" }, 400);
       return c.json(
         service.updateSession(c.req.param("id"), {
@@ -380,6 +388,7 @@ export function createApp(deps: AppDeps): Hono {
           title: typeof body.title === "string" ? body.title : undefined,
           autoApprovals: body.autoApprovals as boolean | undefined,
           approachGate: body.approachGate as boolean | undefined,
+          yolo: body.yolo as boolean | undefined,
           discussing: body.discussing as boolean | undefined,
         }),
       );
@@ -514,7 +523,15 @@ export function createApp(deps: AppDeps): Hono {
       if (!file.startsWith(root + sep) && file !== root) return c.text("Not found", 404);
       const target = extname(file) ? file : join(root, "index.html");
       try {
-        const body = await readFile(target);
+        let body = await readFile(target);
+        // The persisted theme rides on the served page itself, so it applies before first paint
+        // on any origin (the desktop app's port changes between launches). Both themes are
+        // stamped: the bootstrap must be able to tell a stamped dark page from unstamped dev
+        // serving, or a stale local mirror could override the saved dark choice.
+        if (target.endsWith("index.html")) {
+          const theme = service.store.getPreferences().theme;
+          body = Buffer.from(body.toString("utf8").replace('<html lang="en">', `<html lang="en" data-theme="${theme}">`));
+        }
         return c.body(body, 200, {
           "content-type": MIME[extname(target)] ?? "application/octet-stream",
           "content-security-policy":

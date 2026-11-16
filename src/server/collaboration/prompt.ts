@@ -1,5 +1,5 @@
 import type { CheckpointCategory, DecisionKind } from "../../shared/types.js";
-import { SHARED_PRINCIPLES, type EffectivePolicy } from "./policies.js";
+import { CHAT_INLINE_CATEGORIES, SHARED_PRINCIPLES, type EffectivePolicy } from "./policies.js";
 
 /** Default checkpoint tool name; runtimes that namespace tools (Claude Code's MCP) report their own. */
 export const CHECKPOINT_TOOL = "peer_checkpoint";
@@ -21,11 +21,14 @@ const CATEGORY_DESCRIPTIONS: Record<CheckpointCategory, string> = {
   routine: "not a question: you tell Peer the work is purely mechanical (never a feature, a fix, or a design choice)",
 };
 
-function gateInstruction(plan: EffectivePolicy, tool: string): string {
+function gateInstruction(plan: EffectivePolicy, tool: string, generalChat = false): string {
   switch (plan.gate) {
     case "open":
       return "Code changes: allowed.";
     case "engage":
+      // A chat has no project to protect: the developer's next reply is their engagement.
+      if (generalChat)
+        return "Code changes: locked by Peer until the developer replies. In a chat this rarely matters: ask your question in your reply and end your turn.";
       return `Code changes: locked by Peer until the developer engages on this task (answers a ${tool} question, delegates, or skips). A go-ahead on a category "confirm" checkpoint approves the plan but does not unlock: ask a hypothesis or concept question instead. Reading and exploring the code is allowed. Attempted edits will be rejected; do not try to work around this. Routine work is the exception: a rename, formatting, boilerplate that copies a pattern the codebase already has, or tests and docs for behavior the developer already agreed to in an earlier answer. For that, call ${tool} with category "routine" and a one-line summary: Peer records it without asking and unlocks code changes; do not ask for a go-ahead. Adding a feature, fixing a bug, or choosing how something should work is never routine, however small: the developer's request is not their reasoning about it. Engage them first.`;
     case "hold":
       return "Code changes: locked by Peer for this turn. Reading and exploring the code is allowed; do not attempt edits.";
@@ -40,6 +43,8 @@ export interface PromptContext {
   previousTurnLocked?: boolean;
   /** The session's Collaborate approach gate is on, with this file-count threshold. */
   approachGateThreshold?: number;
+  /** A general chat: not tied to a project; the working directory is Peer's scratch folder. */
+  generalChat?: boolean;
 }
 
 /**
@@ -48,7 +53,8 @@ export interface PromptContext {
  */
 export function composeSystemPrompt(plan: EffectivePolicy, tool: string = CHECKPOINT_TOOL, context: PromptContext = {}): string {
   const { policy } = plan;
-  const asks = plan.askFor.filter((c) => c !== "routine");
+  // In a chat, teaching questions are asked in the reply (Peer declines them as checkpoints).
+  const asks = plan.askFor.filter((c) => c !== "routine" && !(context.generalChat && CHAT_INLINE_CATEGORIES.includes(c)));
   const categories = asks.map((c) => `- ${c}: ${CATEGORY_DESCRIPTIONS[c]}`).join("\n");
   const decided = context.decided ?? [];
 
@@ -56,6 +62,14 @@ export function composeSystemPrompt(plan: EffectivePolicy, tool: string = CHECKP
     "# Peer collaboration policy",
     "You are the coding agent inside Peer, a workspace that automates tedious work, collaborates on meaningful work, and preserves the thinking that helps developers grow.",
     "",
+    ...(context.generalChat
+      ? [
+          "## General chat",
+          "This conversation is not tied to a project. Your working directory is a scratch folder Peer keeps for chats, not the developer's code: do not explore it for context. Where the guidance below says \"this codebase\", ground your questions and examples in what the developer brings to the conversation instead. Files you create here are scratch work (a snippet to run, a small experiment).",
+          `Talk here like a conversation: ask teaching questions (a concept check, a prediction) in your reply as plain text and end your turn; the developer answers in the chat. Use the \`${tool}\` tool only when you need them to make a choice that changes what you do next (which topic to cover, which approach to take), not to quiz them.`,
+          "",
+        ]
+      : []),
     `## Active mode: ${policy.label}. ${policy.tagline}`,
     ...policy.guidance.map((g) => `- ${g}`),
     "",
@@ -72,7 +86,7 @@ export function composeSystemPrompt(plan: EffectivePolicy, tool: string = CHECKP
     "",
     "## This turn",
     plan.intentGuidance ? `- Developer intent: ${plan.intentGuidance}` : "- Developer intent: none beyond the message itself.",
-    `- ${gateInstruction(plan, tool)}`,
+    `- ${gateInstruction(plan, tool, context.generalChat)}`,
     ...(plan.gate === "open" && context.previousTurnLocked
       ? ["- Earlier turns in this conversation said not to change code. That no longer applies: you can edit files and run commands in this turn."]
       : []),
@@ -81,7 +95,9 @@ export function composeSystemPrompt(plan: EffectivePolicy, tool: string = CHECKP
       : []),
     "",
     "## Checkpoints",
-    `To bring a decision or question to the developer, call the \`${tool}\` tool. It pauses your work until the developer responds, then returns their response. Do not use any other question or ask-user tool (such as \`question\` or \`AskUserQuestion\`) and do not end your turn just to ask something you could ask with a checkpoint.`,
+    context.generalChat
+      ? `In this chat, a teaching question (a concept check, a prediction) is part of your reply: ask it as plain text and end your turn, and the developer answers in the chat (Peer declines hypothesis and concept checkpoints here). For a choice that changes what you do next, call the \`${tool}\` tool: it pauses your work until the developer responds, then returns their response. Do not use any other question or ask-user tool (such as \`question\` or \`AskUserQuestion\`).`
+      : `To bring a decision or question to the developer, call the \`${tool}\` tool. It pauses your work until the developer responds, then returns their response. Do not use any other question or ask-user tool (such as \`question\` or \`AskUserQuestion\`) and do not end your turn just to ask something you could ask with a checkpoint.`,
     `- Categories the developer decides in this turn (others are declined by Peer and you decide yourself):\n${categories}`,
     `- Peer declines questions beyond ${plan.checkpointBudget} in this turn (risk excluded). That is a ceiling, not a target: many turns need one question or none. Ask one focused question per checkpoint, and never one the developer already answered.`,
     "- Give 2-4 short options when there are discrete choices, and name the one you recommend. Use context to say why the decision matters.",
@@ -96,6 +112,9 @@ export function composeSystemPrompt(plan: EffectivePolicy, tool: string = CHECKP
           `- Approach gate: this session asks the developer to agree when a task's edits grow past ${context.approachGateThreshold} files. Peer pauses the edit that crosses the threshold before it runs and asks them; if they stop the task, finish without further edits and summarize.`,
         ]
       : []),
+    "",
+    "## Formatting",
+    "Peer renders your replies (and a checkpoint's context) as Markdown, including ```mermaid diagrams and LaTeX math between $...$ (inline) or $$...$$ (display). Write a literal dollar sign as \\$ outside code. Leave diagram colors to Peer (it themes them for light and dark); to highlight a path or nodes, prefer labels or a dotted/thick link over classDef or style colors.",
     "",
     "## Safety",
     "Destructive commands and access outside the workspace are governed by separate permission rules in every mode; the developer approves them explicitly. Never try to bypass a denied permission.",

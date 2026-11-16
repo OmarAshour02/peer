@@ -1,9 +1,8 @@
 import { useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import type { Checkpoint, CheckpointAction, CollaborationModeId, PermissionReply, PermissionRequest } from "../../shared/types";
 import { CATEGORY_UI, CONTROL_UI } from "../modes";
 import { usePeer } from "../store";
+import { StreamingMarkdown } from "./StreamingMarkdown";
 
 function useAct() {
   const api = usePeer((s) => s.api);
@@ -98,7 +97,7 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
   // discussion means the same as going ahead; hints are for Learn's reasoning questions.
   const peer = cp.source === "peer";
   return (
-    <div className={`my-3 rounded-lg border ${open ? "border-accent/60 bg-accent/5" : "border-line bg-raised/40"} px-4 py-3`}>
+    <div className={`my-3 rounded-xl border ${open ? "border-accent/60 bg-panel shadow-card" : "border-dashed border-line bg-raised/40"} px-4 py-3`}>
       <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wider">
         <span className={open ? "text-accent" : "text-faint"}>{peer ? "Peer paused the agent" : CATEGORY_UI[cp.category]}</span>
         {peer && <span className="text-faint">· {cp.decision?.kind === "contract" ? "public API change" : cp.decision?.kind === "approach" ? "large change" : "new dependency"}</span>}
@@ -106,11 +105,10 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
         {cp.status === "interrupted" && <span className="text-warn">· the run ended before you answered; answering resumes it</span>}
         {cp.status === "cancelled" && <span className="text-faint">· cancelled</span>}
       </div>
-      <div className="text-[14px] leading-relaxed text-fg">{cp.question}</div>
+      {/* Questions can carry code (a rule to diagnose, a query to read): render them as Markdown, like the context. */}
+      <StreamingMarkdown text={cp.question} live={false} className="markdown checkpoint-question text-[14px] leading-relaxed text-fg" />
       {cp.context && (
-        <div className="markdown mt-1 text-[13px] text-muted">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{cp.context}</ReactMarkdown>
-        </div>
+        <StreamingMarkdown text={cp.context} live={false} className="markdown mt-1 text-[13px] text-muted" />
       )}
 
       {cp.options.length > 0 && (
@@ -213,7 +211,7 @@ export function PermissionCard({ request }: { request: PermissionRequest }) {
   // Claude Code says what "Always allow" saves; it is often narrower than it sounds (one exact command).
   const always = Array.isArray(request.metadata.always) ? (request.metadata.always as { grant: string; scope: string }[]) : null;
   return (
-    <div className="my-3 rounded-lg border border-warn/60 bg-warn/5 px-4 py-3">
+    <div className="my-3 rounded-xl border border-warn/60 bg-panel px-4 py-3 shadow-card">
       <div className="text-[11px] uppercase tracking-wider text-warn">Permission needed · {request.permission}</div>
       <pre className="mt-1.5 whitespace-pre-wrap break-all font-mono text-[12px] text-fg">{request.patterns.join("\n")}</pre>
       <div className="mt-2 flex gap-2">

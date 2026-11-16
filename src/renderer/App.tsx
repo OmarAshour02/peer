@@ -2,15 +2,19 @@ import { useEffect, useState } from "react";
 import { NOTHING_TO_UNDO } from "../shared/types";
 import { PeerApi, resolveConfig } from "./api";
 import { ChangesPanel } from "./components/ChangesPanel";
+import { Constellation } from "./components/Constellation";
 import { Composer } from "./components/Composer";
 import { ProvidersDialog } from "./components/ProvidersDialog";
 import { RuntimeSettingsDialog } from "./components/RuntimeSettingsDialog";
-import { Sidebar } from "./components/Sidebar";
-import { Transcript } from "./components/Transcript";
+import { SearchDialog } from "./components/SearchDialog";
+import { SearchButton, Sidebar, SidebarToggle } from "./components/Sidebar";
+import { ThreadBackdrop, Transcript } from "./components/Transcript";
 import { MODE_UI } from "./modes";
 import { RUNTIME_UI } from "./runtimes";
 import { activeRuntime, runtimeInfo, usePeer } from "./store";
 
+
+const SIDEBAR_KEY = "peer-sidebar";
 export function App() {
   const { ready, error, notice, activeWorkspaceId, activeSessionId, snapshot, modelsError, workspaces, api } = usePeer();
   const kind = usePeer(activeRuntime);
@@ -19,7 +23,38 @@ export function App() {
   const settingsOpen = usePeer((s) => s.settingsOpen);
   const runtime = runtimeInfo({ runtimes }, kind).status;
   const [fatal, setFatal] = useState<string | null>(null);
-  const [showChanges, setShowChanges] = useState(true);
+  // Closed until the developer opens it from the header: the panel never opens on its own.
+  const [showChanges, setShowChanges] = useState(false);
+  // Each session starts with the panel closed, even if it was open in the previous one.
+  useEffect(() => setShowChanges(false), [activeSessionId]);
+  const [searchOpen, setSearchOpen] = useState(false);
+  // ⌘K / Ctrl+K opens search from anywhere (and closes it again).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  // The sidebar stays as the developer last left it (a per-window convenience; open if unknown).
+  const [sidebarOpen, setSidebarOpenState] = useState(() => {
+    try {
+      return window.localStorage.getItem(SIDEBAR_KEY) !== "closed";
+    } catch {
+      return true;
+    }
+  });
+  const setSidebarOpen = (open: boolean) => {
+    setSidebarOpenState(open);
+    try {
+      window.localStorage.setItem(SIDEBAR_KEY, open ? "open" : "closed");
+    } catch {
+      // Remembered for this run only.
+    }
+  };
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -65,8 +100,15 @@ export function App() {
     <div className="flex h-full" data-peer-ready="true">
       {providersOpen && <ProvidersDialog />}
       {settingsOpen && <RuntimeSettingsDialog />}
-      <Sidebar />
-      <main className="flex min-w-0 flex-1 flex-col">
+      {searchOpen && <SearchDialog onClose={() => setSearchOpen(false)} />}
+      {sidebarOpen && <Sidebar onClose={() => setSidebarOpen(false)} onSearch={() => setSearchOpen(true)} />}
+      <main className="relative flex min-w-0 flex-1 flex-col">
+        {!sidebarOpen && (
+          <div className="absolute left-3 top-3 z-20 flex items-center gap-0.5">
+            <SidebarToggle open={false} onToggle={() => setSidebarOpen(true)} />
+            <SearchButton onSearch={() => setSearchOpen(true)} />
+          </div>
+        )}
         {runtime.state !== "ready" && (
           <div className="flex items-center gap-3 border-b border-line bg-warn/10 px-4 py-2 text-[12px] text-warn">
             <span className="min-w-0 flex-1 truncate">
@@ -112,32 +154,46 @@ export function App() {
         )}
 
         {snapshot ? (
-          <>
-            <header className="flex items-center gap-3 border-b border-line px-6 py-2.5">
-              <div className="min-w-0 flex-1">
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            <ThreadBackdrop />
+            <header className={`relative flex items-center gap-4 border-b border-line/70 py-3 pr-6 ${sidebarOpen ? "pl-6" : "pl-20"}`}>
+              <div className="min-w-[9rem] flex-1">
                 <div className="truncate text-[14px] font-medium">{snapshot.session.title}</div>
-                <div className="truncate font-mono text-[11px] text-faint">{workspace?.path}</div>
+                {workspace?.general ? (
+                  <div className="truncate text-[11px] text-faint">General chat · not tied to a project</div>
+                ) : (
+                  <div className="truncate font-mono text-[11px] text-faint">{workspace?.path}</div>
+                )}
               </div>
-              <span className="text-[12px] text-faint">{RUNTIME_UI[snapshot.session.runtime].label}</span>
-              <span className={`text-[12px] ${MODE_UI[snapshot.session.mode].color}`}>{MODE_UI[snapshot.session.mode].label}</span>
-              {snapshot.session.runtime === "codex" && workspace && <SandboxNetworkToggle workspaceId={workspace.id} on={workspace.sandboxNetwork} />}
-              {snapshot.session.runtime === "claude" && <AutoApprovalsToggle sessionId={snapshot.session.id} on={snapshot.session.autoApprovals} />}
-              {snapshot.session.mode === "collaborate" && <ApproachGateToggle sessionId={snapshot.session.id} on={snapshot.session.approachGate} />}
-              <UndoButton />
-              <button onClick={() => setShowChanges(!showChanges)} className="text-[12px] text-faint hover:text-fg">
-                {showChanges ? "Hide changes" : "Show changes"}
-              </button>
+              <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-1 whitespace-nowrap">
+                <span className="text-[12px] text-faint">
+                  {RUNTIME_UI[snapshot.session.runtime].label} · <span className={MODE_UI[snapshot.session.mode].color}>{MODE_UI[snapshot.session.mode].label}</span>
+                </span>
+                {snapshot.session.runtime === "codex" && workspace && <SandboxNetworkToggle workspaceId={workspace.id} on={workspace.sandboxNetwork} />}
+                {snapshot.session.runtime === "claude" && <AutoApprovalsToggle sessionId={snapshot.session.id} on={snapshot.session.autoApprovals} />}
+                {snapshot.session.runtime !== "gemini" && <YoloToggle sessionId={snapshot.session.id} on={snapshot.session.yolo} />}
+                {snapshot.session.mode === "collaborate" && <ApproachGateToggle sessionId={snapshot.session.id} on={snapshot.session.approachGate} />}
+                <UndoButton />
+                <button
+                  onClick={() => setShowChanges(!showChanges)}
+                  aria-pressed={showChanges}
+                  title={showChanges ? "Hide the changes panel" : "Show the changes panel"}
+                  className={`text-[12px] ${showChanges ? "text-fg" : "text-faint hover:text-fg"}`}
+                >
+                  Changes
+                </button>
+              </div>
             </header>
-            <div className="flex min-h-0 flex-1">
+            <div className="relative flex min-h-0 flex-1">
               <div className="flex min-w-0 flex-1 flex-col">
                 <Transcript />
                 <Composer />
               </div>
-              {showChanges && <ChangesPanel />}
+              {showChanges && <ChangesPanel onClose={() => setShowChanges(false)} />}
             </div>
-          </>
+          </div>
         ) : (
-          <EmptyState hasWorkspace={Boolean(activeWorkspaceId)} sessionSelected={Boolean(activeSessionId)} />
+          <EmptyState hasWorkspace={Boolean(activeWorkspaceId)} general={workspace?.general === true} sessionSelected={Boolean(activeSessionId)} />
         )}
       </main>
     </div>
@@ -202,6 +258,34 @@ function AutoApprovalsToggle({ sessionId, on }: { sessionId: string; on: boolean
   );
 }
 
+/** YOLO: Peer approves every permission request in this session without asking. */
+function YoloToggle({ sessionId, on }: { sessionId: string; on: boolean }) {
+  const api = usePeer((s) => s.api);
+  async function toggle() {
+    if (!api) return;
+    try {
+      await api.updateSession(sessionId, { yolo: !on });
+    } catch (err) {
+      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return (
+    <button
+      onClick={() => void toggle()}
+      role="switch"
+      aria-checked={on}
+      title={
+        on
+          ? "YOLO is on: Peer approves every permission request in this session without asking, including destructive commands (rm, git push, sudo…) and escalations. Peer's collaboration rules still apply. Click to turn off."
+          : "Turn on YOLO to have Peer approve every permission request in this session without asking, including destructive commands. Collaboration (checkpoints, Learn, Discuss first) is unchanged; use Just do it for that."
+      }
+      className={on ? "yolo-on rounded-full px-2 py-0.5 text-[11px] font-semibold tracking-wide" : "text-[12px] text-faint hover:text-fg"}
+    >
+      {on ? "YOLO" : "YOLO: off"}
+    </button>
+  );
+}
+
 /** Collaborate approach gate: Peer asks before a task's edits grow past five files. */
 function ApproachGateToggle({ sessionId, on }: { sessionId: string; on: boolean }) {
   const api = usePeer((s) => s.api);
@@ -256,21 +340,24 @@ function UndoButton() {
       title={undo.available ? "Revert the files the last turn changed and remove it from the conversation" : (undo.reason ?? undefined)}
       className="text-[12px] text-faint hover:text-fg disabled:opacity-40 disabled:hover:text-faint"
     >
-      {busy ? "Undoing…" : "Undo last turn"}
+      {busy ? "Undoing…" : "Undo"}
     </button>
   );
 }
 
-function EmptyState({ hasWorkspace, sessionSelected }: { hasWorkspace: boolean; sessionSelected: boolean }) {
+function EmptyState({ hasWorkspace, general, sessionSelected }: { hasWorkspace: boolean; general: boolean; sessionSelected: boolean }) {
   if (sessionSelected) return <div className="flex-1" />;
   return (
-    <div className="flex flex-1 items-center justify-center">
-      <div className="max-w-md text-center">
+    <div className="relative flex flex-1 items-center justify-center overflow-hidden">
+      <Constellation />
+      <div className="relative max-w-md text-center">
         <div className="text-[18px] font-semibold">AI coding that makes you better, not just faster.</div>
         <p className="mt-2 text-[13px] leading-relaxed text-muted">
-          {hasWorkspace
+          {general
+            ? "Start a new chat from the sidebar to ask anything that isn't about a project: a concept, a design question, a snippet to try. Collaborate and Learn work here too."
+            : hasWorkspace
             ? "Start a new session from the sidebar. Pick a mode next to the prompt: Collaborate to engineer it together with a teammate, Learn to build your understanding while the work gets done."
-            : "Open a project folder to begin. The agent can only work inside folders you choose."}
+            : "Open a project folder to begin, or start a general chat. The agent can only work inside folders you choose."}
         </p>
       </div>
     </div>

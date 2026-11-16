@@ -12,3 +12,6 @@ vendor/
 /.claude/
 /docs/verification.md
 /docs/agdr/
+
+# Impeccable design tool: per-session hook cache (local paths)
+/.impeccable/hook.cache.json

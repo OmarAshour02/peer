@@ -1,20 +1,52 @@
 @import "tailwindcss";
 
+/* Peer's design system (DESIGN.md, "The Constellation Graph"): dark is home; the light theme is
+   the paper palette. Token names are stable across themes — only values change. */
 @theme {
-  --color-bg: #0d1117;
-  --color-panel: #11161d;
-  --color-raised: #161b22;
-  --color-line: #262c36;
-  --color-fg: #e6edf3;
-  --color-muted: #8b949e;
-  --color-faint: #6e7681;
-  --color-accent: #58a6ff;
-  --color-focus: #3fb950;
+  --color-bg: #090b09;
+  --color-panel: #0f120f;
+  --color-nav: #0f120f;
+  --color-raised: #171b16;
+  --color-line: #262c24;
+  --color-fg: #e9eee7;
+  --color-muted: #9daa9c;
+  --color-faint: #7d8b7a;
+  --color-accent: #86b985;
+  --color-accent-deep: #5e8f5c;
+  --color-link: #7aa2c9;
+  --color-focus: #7fb069;
   --color-collab: #58a6ff;
   --color-learn: #d2a8ff;
   --color-warn: #d29922;
   --color-danger: #f85149;
+  --color-constellation-node: #a9c4a2;
+  --color-constellation-line: #3a4a38;
+  --shadow-card: 0 8px 30px rgba(0, 0, 0, 0.35);
+  --shadow-composer: 0 12px 40px rgba(0, 0, 0, 0.45);
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+[data-theme="light"] {
+  --color-bg: #f7f5f0;
+  --color-panel: #ffffff;
+  --color-nav: #edeae3;
+  --color-raised: #ffffff;
+  --color-line: #d5d1c9;
+  --color-fg: #292929;
+  --color-muted: #5f5c55;
+  --color-faint: #63665e;
+  --color-accent: #606e56;
+  --color-accent-deep: #55624d;
+  --color-link: #55624d;
+  --color-focus: #606e56;
+  --color-collab: #2a66a3;
+  --color-learn: #7c4dbd;
+  --color-warn: #855c05;
+  --color-danger: #c0362c;
+  --color-constellation-node: #898681;
+  --color-constellation-line: #d5d1c9;
+  --shadow-card: 0 8px 30px rgba(41, 41, 41, 0.1);
+  --shadow-composer: 0 12px 40px rgba(41, 41, 41, 0.12);
 }
 
 html,
@@ -32,6 +64,163 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Keyboard-first: every interactive element shows the accent ring (DESIGN.md, Shapes).
+   Text fields are the exception: their focus shows as the accent border on the field or
+   its container (the composer), never as a rectangular ring inside a rounded box. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+textarea:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: none;
+}
+/* Focusable only from code (the transcript scroller, for example): not a control, so no focus ring. */
+[tabindex="-1"]:focus-visible {
+  outline: none;
+}
+
+::selection {
+  background: var(--color-accent);
+  color: var(--color-bg);
+}
+[data-theme="light"] ::selection {
+  color: #ffffff;
+}
+
+/* The constellation layer: geometry only, edge-dense, clearing toward the center. */
+@keyframes constellation-drift {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(6px, -4px, 0);
+  }
+}
+.constellation-drift {
+  animation: constellation-drift 60s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
+}
+/* Halos sit only under the brightest stars, and only in the dark: the light theme is pencil work. */
+.constellation-halo {
+  opacity: 0.55;
+}
+[data-theme="light"] .constellation-halo {
+  opacity: 0;
+}
+/* The first message dissolves the figure: an opacity-only fade on its own compositor layer, so
+   it stays smooth while the first reply renders and nothing changes size. */
+@keyframes constellation-leave {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.constellation-leave {
+  will-change: opacity;
+  animation: constellation-leave 900ms cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
+}
+/* Hold the drift still while fading, so the layer is drawn once and only its opacity changes. */
+.constellation-leave .constellation-drift {
+  animation-play-state: paused;
+}
+@media (prefers-reduced-motion: reduce) {
+  .constellation-drift,
+  .constellation-leave {
+    animation: none;
+  }
+}
+
+/* Streaming replies: each word fades up out of a slight blur as it is revealed. Only words new
+   this frame animate; the ones already on screen stay mounted and are not touched. */
+@keyframes stream-word-in {
+  from {
+    opacity: 0;
+    filter: blur(3px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+.stream-word {
+  animation: stream-word-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+/* A soft caret after the last line while the reply is still coming in. */
+@keyframes stream-caret {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.streaming > :is(p, h1, h2, h3, h4, blockquote):last-child::after,
+.streaming > :is(ul, ol):last-child > li:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 0.5em;
+  margin-left: 0.3em;
+  border-radius: 9999px;
+  background: var(--color-accent);
+  vertical-align: 0.05em;
+  animation: stream-caret 1.1s ease-in-out infinite;
+}
+
+/* "Jump to latest" rises in when the developer scrolls away from the end of the thread. */
+@keyframes jump-latest-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+.jump-latest {
+  animation: jump-latest-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .jump-latest {
+    animation: none;
+  }
+}
+
+/* YOLO on: Peer approves every permission request itself, so the header says so loudly. */
+.yolo-on {
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-danger) 45%, transparent);
+}
+.yolo-on:hover {
+  background: color-mix(in srgb, var(--color-danger) 22%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stream-word,
+  .streaming > :is(p, h1, h2, h3, h4, blockquote):last-child::after,
+  .streaming > :is(ul, ol):last-child > li:last-child::after {
+    animation: none;
+  }
+}
+
+/* A checkpoint question sits right under its eyebrow: no extra space above or below it. */
+.checkpoint-question > :first-child {
+  margin-top: 0;
+}
+.checkpoint-question > :last-child {
+  margin-bottom: 0;
+}
+
+/* A long identifier, path or URL breaks inside the column instead of widening the transcript. */
+.markdown {
+  overflow-wrap: anywhere;
+}
 .markdown p {
   margin: 0.4em 0;
   line-height: 1.6;
@@ -84,11 +273,15 @@ body {
   padding: 0;
 }
 .markdown a {
-  color: var(--color-accent);
+  color: var(--color-link);
+  text-underline-offset: 3px;
 }
 .markdown table {
   border-collapse: collapse;
   margin: 0.5em 0;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
 }
 .markdown th,
 .markdown td {
@@ -100,13 +293,36 @@ body {
   padding-left: 0.8em;
   color: var(--color-muted);
 }
+.markdown .katex {
+  font-size: 1.08em;
+}
+.markdown .katex-display {
+  margin: 0.6em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2em 0;
+}
+.markdown .mermaid-diagram {
+  background: var(--color-panel);
+  border: 1px solid var(--color-line);
+  border-radius: 6px;
+  padding: 0.8em;
+  margin: 0.5em 0;
+  overflow-x: auto;
+  display: flex;
+  justify-content: center;
+}
+.markdown .mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
 
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #30363d;
+  background: var(--color-line);
   border-radius: 5px;
   border: 2px solid var(--color-bg);
 }

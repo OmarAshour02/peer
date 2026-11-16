@@ -82,10 +82,13 @@ export function Composer() {
         : `Message the agent in ${MODE_UI[session.mode].label} mode…  (${controls.map((c) => CONTROL_UI[c].hint.match(/\(([^)]+)\)$/)?.[1]).join(", ")})`;
 
   return (
-    <div className="border-t border-line bg-panel px-6 pb-4 pt-3">
-      <div className="mx-auto max-w-3xl">
+    // No strip, no divider: the composer is a card floating on the page (and over the
+    // constellation while the thread is empty). 34px sides = the transcript's 24px gutter + the
+    // 10px scrollbar space it reserves on each side, so the composer and the text share one column.
+    <div className="relative px-[34px] pb-5 pt-2">
+      <div className="mx-auto max-w-[960px]">
         <div className="mb-2 flex flex-wrap items-center gap-3">
-          <div className="flex overflow-hidden rounded-md border border-line" role="radiogroup" aria-label="Collaboration mode">
+          <div className="flex overflow-hidden rounded-lg border border-line/60 bg-panel" role="radiogroup" aria-label="Collaboration mode">
             {modes.map((m) => (
               <button
                 key={m}
@@ -133,7 +136,7 @@ export function Composer() {
           </div>
         )}
 
-        <div className="rounded-lg border border-line bg-bg focus-within:border-accent/70">
+        <div className="rounded-2xl border border-line/70 bg-panel shadow-composer focus-within:border-accent/60">
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -148,13 +151,12 @@ export function Composer() {
             placeholder={runtimeReady ? placeholder : `${RUNTIME_UI[session.runtime].label} is not available.`}
             className="block w-full resize-none bg-transparent px-3 py-2.5 text-[14px] outline-none placeholder:text-faint disabled:opacity-60"
           />
-          <div className="flex flex-wrap items-center gap-2 border-t border-line px-2 py-1.5">
-            <div className="flex-1" />
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line/50 px-2 py-1.5">
             <select
               value={session.model ? `${session.model.providerId}/${session.model.modelId}` : ""}
               onChange={(e) => void setModel(e.target.value)}
               title={modelsError ?? "Model"}
-              className="max-w-56 truncate rounded border border-line bg-raised px-1.5 py-0.5 text-[11.5px] text-muted outline-none"
+              className="mr-auto min-w-0 max-w-56 truncate rounded border border-line bg-raised px-1.5 py-0.5 text-[11.5px] text-muted outline-none"
             >
               <option value="">
                 Default{models?.default ? ` (${models.default.providerId}/${models.default.modelId})` : ""}
@@ -170,6 +172,7 @@ export function Composer() {
               ))}
               {session.runtime === "opencode" && <option value={CONNECT}>Connect a provider…</option>}
             </select>
+            <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
             {busy && !waitingOnCheckpoint ? (
               <button
                 onClick={() => api && void api.abort(session.id).catch((err: Error) => setError(err.message))}
@@ -182,7 +185,7 @@ export function Composer() {
                 {busy && (
                   <button
                     onClick={() => api && void api.abort(session.id).catch((err: Error) => setError(err.message))}
-                    className="rounded-md border border-line px-3 py-1 text-[12px] text-muted hover:text-danger"
+                    className="rounded-md border border-line/60 px-3 py-1 text-[12px] text-muted hover:text-danger"
                   >
                     Stop
                   </button>
@@ -193,7 +196,7 @@ export function Composer() {
                     title={waitingOnCheckpoint ? `${CONTROL_UI[c].hint} Answers the open question.` : CONTROL_UI[c].hint}
                     onClick={() => void send(c)}
                     disabled={!canAct || (!text.trim() && !hasMessages && !waitingOnCheckpoint) || (c === "discuss" && session.discussing && !waitingOnCheckpoint)}
-                    className="rounded-md border border-line px-2.5 py-1 text-[12px] text-muted hover:border-accent/60 hover:text-fg disabled:opacity-40"
+                    className="rounded-md border border-line/60 px-2.5 py-1 text-[12px] text-muted hover:border-accent/60 hover:text-fg disabled:opacity-40"
                   >
                     {CONTROL_UI[c].label}
                   </button>
@@ -207,6 +210,7 @@ export function Composer() {
                 </button>
               </>
             )}
+            </div>
           </div>
         </div>
       </div>

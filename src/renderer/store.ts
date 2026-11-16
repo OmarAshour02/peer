@@ -14,6 +14,7 @@ import type {
 } from "../shared/types";
 import { pickDefaultRuntime } from "../shared/types";
 import type { PeerApi } from "./api";
+import { applyTheme, clearPendingTheme, currentTheme, pendingTheme, syncPendingTheme } from "./theme";
 
 interface PeerState {
   api: PeerApi | null;
@@ -59,6 +60,14 @@ interface PeerState {
   setProvidersOpen(open: boolean): void;
   setSettingsOpen(open: boolean): void;
 }
+
+/**
+ * Parts that first appeared through a live event while this window was open. Only these reveal
+ * from their first character; text loaded with a session (history, a turn still waiting on a
+ * checkpoint) shows at once, and only what arrives after that animates in.
+ */
+const freshParts = new Set<string>();
+export const isFreshPart = (partId: string) => freshParts.has(partId);
 
 function upsertPart(messages: PeerMessage[], messageId: string, part: PeerPart): PeerMessage[] {
   const idx = messages.findIndex((m) => m.id === messageId);
@@ -113,11 +122,26 @@ export const usePeer = create<PeerState>((set, get) => ({
 
   async init(api) {
     set({ api });
+    const themeAtStart = currentTheme();
+    const pendingAtStart = pendingTheme();
     const [workspaces, health, prefs] = await Promise.all([api.workspaces(), api.health(), api.preferences()]);
+    // A theme chosen while offline wins over the stored one and is written back now.
+    const pending = pendingTheme();
+    if (pending && pending !== prefs.theme) {
+      applyTheme(pending);
+      void syncPendingTheme(async (theme) => { await api.setPreferences({ theme }); });
+    } else {
+      if (pending) clearPendingTheme();
+      // The captured preferences are stale if the theme moved while init was in flight:
+      // a toggle, or a reconnect that synced the queued choice and cleared its marker.
+      // In that case the displayed theme (already saved server-side) wins.
+      const movedInFlight = currentTheme() !== themeAtStart || (pendingAtStart !== null && pending === null);
+      applyTheme(movedInFlight ? currentTheme() : prefs.theme);
+    }
     set({ workspaces, runtimes: health.runtimes, newRuntime: prefs.defaultRuntime, runtimeChosen: prefs.runtimeChosen, ready: true });
     // Reopen where the developer left off (workspaces are ordered by last use).
     const last = prefs.lastSessionId ? await api.snapshot(prefs.lastSessionId).catch(() => null) : null;
-    const ws = workspaces.find((w) => w.id === last?.session.workspaceId) ?? workspaces[0];
+    const ws = workspaces.find((w) => w.id === last?.session.workspaceId) ?? workspaces.find((w) => !w.general) ?? workspaces[0];
     if (ws) await get().selectWorkspace(ws.id);
     if (last && get().sessions.some((s) => s.id === last.session.id)) await get().selectSession(last.session.id);
   },
@@ -155,6 +179,9 @@ export const usePeer = create<PeerState>((set, get) => ({
 
   async selectSession(id) {
     if (id) get().api?.setPreferences({ lastSessionId: id }).catch(() => {});
+    // Freshness belongs to one viewing of a session: coming back to it (even mid-turn) shows the
+    // text it already has at once.
+    freshParts.clear();
     set({ activeSessionId: id, snapshot: null, messages: [], diff: [], notice: null });
     if (id) await get().resync();
   },
@@ -177,6 +204,8 @@ export const usePeer = create<PeerState>((set, get) => ({
   async reconnected() {
     const { api } = get();
     if (!api) return;
+    // Write back a theme chosen while disconnected.
+    if (pendingTheme()) void syncPendingTheme(async (theme) => { await api.setPreferences({ theme }); });
     // Providers may have changed while events were missed: refresh an open dialog and the model list.
     set((s) => ({ providersVersion: s.providersVersion + 1 }));
     await api
@@ -305,6 +334,7 @@ export const usePeer = create<PeerState>((set, get) => ({
         return;
       }
       case "part.updated":
+        if (!s.messages.some((m) => m.id === event.messageId && m.parts.some((p) => p.id === event.part.id))) freshParts.add(event.part.id);
         set({ messages: upsertPart(s.messages, event.messageId, event.part) });
         return;
       case "part.delta": {

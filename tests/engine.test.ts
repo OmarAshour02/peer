@@ -175,6 +175,49 @@ describe("collaboration gate", () => {
     expect(runtime.aborted).toContain(s.runtimeSessionId);
     expect((await write(s)).allow).toBe(false);
   });
+
+  it("removing a workspace stops its running sessions before deleting them", async () => {
+    const ws = service.addWorkspace(dir);
+    const s = await service.createSession(ws.id, {});
+    await service.send(s.id, "task");
+    expect(engine().statusOf(s.id)).not.toBe("idle");
+    await service.removeWorkspace(ws.id);
+    expect(runtime.aborted).toContain(s.runtimeSessionId);
+    expect(store.getWorkspace(ws.id)).toBeNull();
+    expect(store.getSession(s.id)).toBeNull();
+    expect((await write(s)).allow).toBe(false);
+  });
+
+  it("session creation returning after the project was removed reports an unknown workspace, not a database error", async () => {
+    const ws = service.addWorkspace(dir);
+    const original = runtime.createSession.bind(runtime);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    runtime.createSession = async (...args: Parameters<FakeRuntime["createSession"]>) => {
+      await gate;
+      return original(...args);
+    };
+    const creation = service.createSession(ws.id, {});
+    await service.removeWorkspace(ws.id);
+    release();
+    await expect(creation).rejects.toThrow("Unknown workspace");
+    expect(store.listSessions(ws.id)).toEqual([]);
+  });
+
+  it("a session started while workspace removal is in flight is rejected, not orphaned", async () => {
+    const ws = service.addWorkspace(dir);
+    const s = await service.createSession(ws.id, {});
+    await service.send(s.id, "task");
+    const removal = service.removeWorkspace(ws.id); // marks the workspace synchronously
+    await expect(service.createSession(ws.id, {})).rejects.toThrow("being removed");
+    // A send during removal is rejected too — by the removal guard, or because the
+    // session is already deleted; either way no turn starts unsupervised.
+    await expect(service.send(s.id, "more")).rejects.toThrow();
+    await removal;
+    expect(runtime.aborted).toContain(s.runtimeSessionId);
+    expect(store.getWorkspace(ws.id)).toBeNull();
+    expect(store.listSessions(ws.id)).toEqual([]);
+  });
 });
 
 describe("checkpoints", () => {

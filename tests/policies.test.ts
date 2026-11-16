@@ -38,6 +38,24 @@ describe("policy resolution", () => {
     expect(resolveEffectivePolicy("learn", "answer", false).gate).toBe("open");
   });
 
+  it("Learn talks in short exchanges, sizes each reply itself, and draws when a picture helps", () => {
+    const learn = composeSystemPrompt(resolveEffectivePolicy("learn", "default", false));
+    expect(learn).toMatch(/Teach in a conversation, not in articles/);
+    expect(learn).toMatch(/Size each reply to what it carries; you decide/);
+    expect(learn).toMatch(/Go longer only when the developer asks for it/);
+    expect(learn).not.toMatch(/a concept with several connected parts/);
+    expect(learn).toMatch(/Graduate the difficulty[\s\S]*taught in steps across replies[\s\S]*recall, then apply, then predict, then design/);
+    expect(learn).toMatch(/never introduce a topic and quiz them on the next one in the same reply/);
+    expect(learn).toMatch(/```mermaid diagram/);
+    expect(learn).toMatch(/LaTeX for math/);
+    const collab = composeSystemPrompt(resolveEffectivePolicy("collaborate", "default", false));
+    expect(collab).not.toMatch(/Teach in a conversation/);
+    // Every mode knows what the transcript renders, so math and a literal \$ come out right.
+    for (const p of [learn, collab]) expect(p).toMatch(/## Formatting[\s\S]*mermaid[\s\S]*\$\$\.\.\.\$\$/);
+    expect(resolveEffectivePolicy("learn", "answer", false).intentGuidance).toMatch(/may run long: lead with the answer/);
+    expect(resolveEffectivePolicy("learn", "hint", false).intentGuidance).toMatch(/a few sentences at most/);
+  });
+
   it("composes a system prompt that reflects mode, gate and allowed categories", () => {
     const learn = composeSystemPrompt(resolveEffectivePolicy("learn", "default", false));
     expect(learn).toContain("Active mode: Learn");

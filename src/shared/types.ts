@@ -121,6 +121,11 @@ export interface Workspace {
   name: string;
   /** Commands in Codex's sandbox may use the network (off by default: tests that open a port fail). */
   sandboxNetwork: boolean;
+  /**
+   * Peer's own folder for general chats, not a project: the sidebar lists it as Chats, and it
+   * cannot be removed. Exactly one exists, created at startup in Peer's data directory.
+   */
+  general: boolean;
   createdAt: number;
   lastOpenedAt: number;
 }
@@ -173,6 +178,14 @@ export interface PeerSession {
    * pauses the next edit and asks the developer to agree before it runs. Off by default.
    */
   approachGate: boolean;
+  /**
+   * YOLO: Peer approves every permission request in this session itself, on every runtime,
+   * including destructive commands and the escalations a runtime asks for. Peer's collaboration
+   * rules (checkpoints, the Learn lock, Discuss first, detected decisions) are unchanged, and a
+   * runtime's hard denials (OpenCode outside the project, Gemini's read-only mode) still apply.
+   * Off by default.
+   */
+  yolo: boolean;
   /**
    * "Discuss first" is in effect: follow-up messages keep discussing, with code changes locked,
    * until the developer proceeds (Proceed, Just do it, a go-ahead message) or ends the discussion.
@@ -393,8 +406,13 @@ export interface UndoResult {
   forgotten: boolean;
 }
 
+/** Display theme: dark is home; light is the paper palette (DESIGN.md). */
+export type UiTheme = "dark" | "light";
+
 export interface Preferences {
   defaultMode: CollaborationModeId;
+  /** Display theme, persisted server-side so it survives the desktop app's ephemeral origin. */
+  theme: UiTheme;
   /** Runtime for new sessions (see `pickDefaultRuntime`). */
   defaultRuntime: RuntimeKind;
   /** The runtime the developer last picked, or null if they never did (then Peer picks). */

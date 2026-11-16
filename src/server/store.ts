@@ -16,6 +16,7 @@ import {
   type PeerMessage,
   type PeerSession,
   type Preferences,
+  type UiTheme,
   type RuntimeKind,
   type RuntimeSettings,
   type Turn,
@@ -143,6 +144,14 @@ const MIGRATIONS: string[] = [
   -- Collaborate approach gate: Peer asks before a task's edits grow past a file threshold.
   ALTER TABLE sessions ADD COLUMN approach_gate INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- YOLO: Peer approves every permission request in the session itself.
+  ALTER TABLE sessions ADD COLUMN yolo INTEGER NOT NULL DEFAULT 0;
+  `,
+  `
+  -- General chat: Peer's own folder for chats that don't belong to a project.
+  ALTER TABLE workspaces ADD COLUMN general INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 type Row = Record<string, unknown>;
@@ -198,11 +207,52 @@ export class Store {
       this.db.prepare("UPDATE workspaces SET last_opened_at = ? WHERE path = ?").run(now, path);
       return { ...toWorkspace(existing), lastOpenedAt: now };
     }
-    const ws: Workspace = { id: newId("ws"), path, name, sandboxNetwork: false, createdAt: now, lastOpenedAt: now };
+    const ws: Workspace = { id: newId("ws"), path, name, sandboxNetwork: false, general: false, createdAt: now, lastOpenedAt: now };
     this.db
       .prepare("INSERT INTO workspaces (id, path, name, created_at, last_opened_at) VALUES (?, ?, ?, ?, ?)")
       .run(ws.id, ws.path, ws.name, ws.createdAt, ws.lastOpenedAt);
     return ws;
+  }
+
+  /**
+   * The general-chat workspace at `path`, created on first use. If Peer's data directory moved,
+   * the existing one follows it (its chats keep their history). A project the developer opened at
+   * that path earlier becomes the general workspace.
+   */
+  ensureGeneralWorkspace(path: string): Workspace {
+    const existing = this.db.prepare("SELECT * FROM workspaces WHERE general = 1").get();
+    if (existing) {
+      if (String(existing.path) !== path) {
+        // A project already at the new path is folded into Chats (its sessions move over), so the
+        // path stays unique and nothing is lost.
+        this.db.exec("BEGIN");
+        try {
+          const clash = this.db.prepare("SELECT id FROM workspaces WHERE path = ? AND general = 0").get(path);
+          if (clash) {
+            this.db.prepare("UPDATE sessions SET workspace_id = ? WHERE workspace_id = ?").run(String(existing.id), String(clash.id));
+            this.db.prepare("DELETE FROM workspaces WHERE id = ?").run(String(clash.id));
+          }
+          this.db.prepare("UPDATE workspaces SET path = ? WHERE id = ?").run(path, String(existing.id));
+          this.db.exec("COMMIT");
+        } catch (err) {
+          this.db.exec("ROLLBACK");
+          throw err;
+        }
+      }
+      return this.getWorkspace(String(existing.id))!;
+    }
+    const atPath = this.db.prepare("SELECT * FROM workspaces WHERE path = ?").get(path);
+    if (atPath) {
+      this.db.prepare("UPDATE workspaces SET general = 1, name = 'Chats' WHERE id = ?").run(String(atPath.id));
+      return this.getWorkspace(String(atPath.id))!;
+    }
+    const now = Date.now();
+    const id = newId("ws");
+    // Last opened at 0: the developer's projects come first when Peer picks where to reopen.
+    this.db
+      .prepare("INSERT INTO workspaces (id, path, name, general, created_at, last_opened_at) VALUES (?, ?, 'Chats', 1, ?, 0)")
+      .run(id, path, now);
+    return this.getWorkspace(id)!;
   }
 
   updateWorkspace(id: string, patch: { sandboxNetwork?: boolean }): Workspace | null {
@@ -227,6 +277,25 @@ export class Store {
       .map(toSession);
   }
 
+  /**
+   * Sessions whose title contains `query` (case-insensitive), across every workspace including
+   * Chats, most recent first. An empty query lists the most recent sessions.
+   */
+  searchSessions(query: string, limit = 30): PeerSession[] {
+    // Matched in JS, not with LIKE: SQLite folds only ASCII case ("école" must find "ÉCOLE"), and
+    // the query's characters are plain text, never wildcards. A local store holds few sessions.
+    const fold = (text: string) => text.normalize("NFC").toLowerCase();
+    const q = fold(query.trim());
+    const max = Math.max(1, Math.min(limit, 100));
+    const found: PeerSession[] = [];
+    for (const row of this.db.prepare("SELECT * FROM sessions ORDER BY updated_at DESC").iterate()) {
+      const session = toSession(row as Row);
+      if (q === "" || fold(session.title).includes(q)) found.push(session);
+      if (found.length >= max) break;
+    }
+    return found;
+  }
+
   getSession(id: string): PeerSession | null {
     const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id);
     return row ? toSession(row) : null;
@@ -247,7 +316,7 @@ export class Store {
   }): PeerSession {
     const now = Date.now();
     // Auto approvals start off; the developer turns them on per session.
-    const session: PeerSession = { id: newId("ps"), ...input, autoApprovals: false, approachGate: false, discussing: false, createdAt: now, updatedAt: now };
+    const session: PeerSession = { id: newId("ps"), ...input, autoApprovals: false, approachGate: false, yolo: false, discussing: false, createdAt: now, updatedAt: now };
     this.db
       .prepare(
         `INSERT INTO sessions (id, workspace_id, runtime, runtime_session_id, title, mode, model_provider, model_id, created_at, updated_at)
@@ -268,7 +337,7 @@ export class Store {
     return session;
   }
 
-  updateSession(id: string, patch: { title?: string; mode?: CollaborationModeId; model?: ModelRef | null; autoApprovals?: boolean; approachGate?: boolean; discussing?: boolean }): PeerSession {
+  updateSession(id: string, patch: { title?: string; mode?: CollaborationModeId; model?: ModelRef | null; autoApprovals?: boolean; approachGate?: boolean; yolo?: boolean; discussing?: boolean }): PeerSession {
     const current = this.getSession(id);
     if (!current) throw new Error(`Unknown session ${id}`);
     const next: PeerSession = {
@@ -278,12 +347,13 @@ export class Store {
       model: patch.model === undefined ? current.model : patch.model,
       autoApprovals: patch.autoApprovals ?? current.autoApprovals,
       approachGate: patch.approachGate ?? current.approachGate,
+      yolo: patch.yolo ?? current.yolo,
       discussing: patch.discussing ?? current.discussing,
       updatedAt: Date.now(),
     };
     this.db
-      .prepare("UPDATE sessions SET title = ?, mode = ?, model_provider = ?, model_id = ?, auto_approvals = ?, approach_gate = ?, discussing = ?, updated_at = ? WHERE id = ?")
-      .run(next.title, next.mode, next.model?.providerId ?? null, next.model?.modelId ?? null, next.autoApprovals ? 1 : 0, next.approachGate ? 1 : 0, next.discussing ? 1 : 0, next.updatedAt, id);
+      .prepare("UPDATE sessions SET title = ?, mode = ?, model_provider = ?, model_id = ?, auto_approvals = ?, approach_gate = ?, yolo = ?, discussing = ?, updated_at = ? WHERE id = ?")
+      .run(next.title, next.mode, next.model?.providerId ?? null, next.model?.modelId ?? null, next.autoApprovals ? 1 : 0, next.approachGate ? 1 : 0, next.yolo ? 1 : 0, next.discussing ? 1 : 0, next.updatedAt, id);
     return next;
   }
 
@@ -549,6 +619,7 @@ export class Store {
       runtimeChosen: runtime && RUNTIME_KINDS.includes(runtime) ? runtime : null,
       lastSessionId: lastSessionId && this.getSession(lastSessionId) ? lastSessionId : null,
       runtimeSettings: { ...DEFAULT_RUNTIME_SETTINGS, ...((get("runtimeSettings") as Partial<RuntimeSettings> | undefined) ?? {}) },
+      theme: (get("theme") as UiTheme | undefined) ?? "dark",
       crossSessionMemory: (get("crossSessionMemory") as boolean | undefined) ?? true,
       memoryResetAt: (get("memoryResetAt") as number | undefined) ?? 0,
       memoryResetEventId: (get("memoryResetEventId") as number | undefined) ?? 0,
@@ -625,6 +696,7 @@ export class Store {
     if (prefs.defaultRuntime) put.run("defaultRuntime", JSON.stringify(prefs.defaultRuntime));
     if (prefs.lastSessionId !== undefined) put.run("lastSessionId", JSON.stringify(prefs.lastSessionId));
     if (prefs.runtimeSettings) put.run("runtimeSettings", JSON.stringify({ ...DEFAULT_RUNTIME_SETTINGS, ...prefs.runtimeSettings }));
+    if (prefs.theme !== undefined) put.run("theme", JSON.stringify(prefs.theme));
     if (prefs.crossSessionMemory !== undefined) put.run("crossSessionMemory", JSON.stringify(prefs.crossSessionMemory));
     if (prefs.memoryResetAt !== undefined) put.run("memoryResetAt", JSON.stringify(prefs.memoryResetAt));
     // A reset also moves the event-id watermark to now, unless the caller set it explicitly:
@@ -641,6 +713,7 @@ function toWorkspace(r: Row): Workspace {
     path: String(r.path),
     name: String(r.name),
     sandboxNetwork: Number(r.sandbox_network ?? 0) === 1,
+    general: Number(r.general ?? 0) === 1,
     createdAt: Number(r.created_at),
     lastOpenedAt: Number(r.last_opened_at),
   };
@@ -657,6 +730,7 @@ function toSession(r: Row): PeerSession {
     model: r.model_provider && r.model_id ? { providerId: String(r.model_provider), modelId: String(r.model_id) } : null,
     autoApprovals: Number(r.auto_approvals ?? 0) === 1,
     approachGate: Number(r.approach_gate ?? 0) === 1,
+    yolo: Number(r.yolo ?? 0) === 1,
     discussing: Number(r.discussing ?? 0) === 1,
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
