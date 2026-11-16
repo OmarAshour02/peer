@@ -85,6 +85,9 @@ jobs:
             # ad-hoc signature needs no Apple account. Not notarized, so Gatekeeper still warns about
             # a browser-downloaded DMG; scripts/install.sh (curl) avoids that.
             echo "::warning::No signing certificate configured; building an ad-hoc signed app (not notarized)."
+            # Unset secrets arrive as empty strings; electron-builder would read an empty CSC_LINK
+            # as a path (the project folder) and fail.
+            unset CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_API_KEY_CONTENT
             # electron-builder skips all signing on pull-request builds to protect certificates;
             # an ad-hoc signature uses no secret, so force it and keep PR builds like release builds.
             CSC_FOR_PULL_REQUEST=true CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder ${{ matrix.builder }} --publish never -c.mac.identity=-
