@@ -1,15 +1,15 @@
 {
   "name": "peer",
   "productName": "Peer",
-  "version": "0.1.0",
+  "version": "0.2.0-alpha.1",
   "description": "AI coding that makes developers better, not just faster.",
   "private": true,
   "type": "module",
   "main": "dist/electron/main.cjs",
   "author": {
-    "name": "Peer Team"
+    "name": "Omar Ashour"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "node": ">=22.13"
   },
@@ -72,5 +72,12 @@
   "opencode": {
     "version": "1.19.3"
   },
-  "homepage": "https://github.com/peer-dev/peer"
+  "homepage": "https://github.com/OmarAshour02/peer",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OmarAshour02/peer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OmarAshour02/peer/issues"
+  }
 }

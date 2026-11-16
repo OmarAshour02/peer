@@ -3,7 +3,7 @@
 #   node scripts/fetch-opencode.mjs --target mac-arm64 && npx electron-builder --mac --arm64
 appId: dev.peer.app
 productName: Peer
-copyright: Copyright © 2026 Peer Team
+copyright: Copyright © 2026 Omar Ashour
 directories:
   output: release
   buildResources: build
@@ -44,7 +44,7 @@ linux:
   category: Development
   executableName: peer
   synopsis: AI coding that makes developers better, not just faster.
-  maintainer: Peer Team <noreply@example.com>
+  maintainer: Omar Ashour <68746440+OmarAshour02@users.noreply.github.com>
 
 deb:
   depends:

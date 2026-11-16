@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in Peer doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead. Screenshots help.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Peer version
+      placeholder: 0.2.0-alpha.1
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS, Apple Silicon
+        - macOS, Intel
+        - Linux x64
+        - Linux arm64
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install Peer?
+      options:
+        - install.sh (curl)
+        - DMG
+        - AppImage
+        - .deb
+        - Built from source
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime
+      options:
+        - OpenCode (bundled)
+        - Claude Code
+        - Codex
+        - Gemini CLI
+        - Not runtime-specific
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - Collaborate
+        - Learn
+        - Not mode-specific
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error text
+      description: Remove anything private (API keys, project code) before pasting.
+      render: text
