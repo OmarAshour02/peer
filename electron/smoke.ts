@@ -158,30 +158,19 @@ export async function runSmokeTest(peer: PeerServer, openWindow: () => BrowserWi
     if (!near(darkNavPx, [15, 18, 15])) throw new Error(`dark sidebar pixel: ${darkNavPx}`);
     const darkGround = await groundFraction([9, 11, 9]);
     if (darkGround < 0.8) throw new Error(`dark ground pixels: ${darkGround}`);
-    // Pin motion to "no-preference" so the check doesn't depend on the host's accessibility
-    // settings (CI macOS runners can have Reduce Motion on, which correctly stops the drift).
-    const dbg = win.webContents.debugger;
-    if (!dbg.isAttached()) dbg.attach("1.3");
-    await dbg.sendCommand("Emulation.setEmulatedMedia", { media: "", features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
-    await sleep(200);
     const before = await read(`(() => {
       const cs = getComputedStyle(document.documentElement);
       const composer = document.querySelector('.shadow-composer');
-      const drift = document.querySelector('.constellation-drift');
       return {
         bg: cs.getPropertyValue('--color-bg').trim(),
         accent: cs.getPropertyValue('--color-accent').trim(),
         composerShadow: composer ? getComputedStyle(composer).boxShadow : 'missing',
-        driftAnimation: drift ? getComputedStyle(drift).animationName : 'missing',
         selection: getComputedStyle(document.body, '::selection').backgroundColor,
       };
     })()`);
-    // Detach before the pixel checks: with the debugger attached, Linux (xvfb) captured a stale frame.
-    dbg.detach();
     if (before.bg !== "#090b09") throw new Error(`dark bg token: ${before.bg}`);
     if (before.accent !== "#86b985") throw new Error(`dark accent token: ${before.accent}`);
     if (before.composerShadow === "missing" || before.composerShadow === "none") throw new Error(`composer shadow: ${before.composerShadow}`);
-    if (before.driftAnimation !== "constellation-drift") throw new Error(`constellation animation: ${before.driftAnimation}`);
     if (before.selection !== "rgb(134, 185, 133)") throw new Error(`selection color: ${before.selection}`);
 
     await read(`(() => { document.querySelector('button[role="switch"][aria-label="Light theme"]')?.click(); return {}; })()`);
@@ -231,9 +220,22 @@ export async function runSmokeTest(peer: PeerServer, openWindow: () => BrowserWi
     })()`);
     if (scrollerFocus.present && scrollerFocus.focused && scrollerFocus.outlineStyle !== "none") throw new Error(`transcript shows a focus ring: ${JSON.stringify(scrollerFocus)}`);
 
-    // Reduced motion must stop the constellation drift in the applied media query.
+    // The constellation drifts when motion is allowed, and reduced motion stops it. Both are
+    // emulated, so the result doesn't depend on the host (CI macOS runners have Reduce Motion on).
+    // The debugger is attached only here, after the pixel checks: emulating media before them made
+    // Linux (xvfb) capture a stale frame after the theme switch.
+    const dbg = win.webContents.debugger;
+    const driftAnimation = async () =>
+      (await read(`(() => {
+        const drift = document.querySelector('.constellation-drift');
+        return { a: drift ? getComputedStyle(drift).animationName : 'missing' };
+      })()`)).a;
     try {
       if (!dbg.isAttached()) dbg.attach("1.3");
+      await dbg.sendCommand("Emulation.setEmulatedMedia", { media: "", features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
+      await sleep(200);
+      const moving = await driftAnimation();
+      if (moving !== "constellation-drift") throw new Error(`constellation animation: ${moving}`);
       await dbg.sendCommand("Emulation.setEmulatedMedia", { media: "", features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
       await sleep(200);
       const reduced = await read(`(() => {
