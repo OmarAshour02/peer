@@ -1,3 +1,5 @@
+<img src="build/icon.png" alt="Peer" width="128" height="128">
+
 # Peer
 
 **AI coding that makes developers better, not just faster.**
