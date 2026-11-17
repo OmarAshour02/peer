@@ -3,11 +3,12 @@ import { NOTHING_TO_UNDO } from "../shared/types";
 import { PeerApi, resolveConfig } from "./api";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { Constellation } from "./components/Constellation";
+import { LearningMapView } from "./components/LearningMap";
 import { Composer } from "./components/Composer";
 import { ProvidersDialog } from "./components/ProvidersDialog";
 import { RuntimeSettingsDialog } from "./components/RuntimeSettingsDialog";
 import { SearchDialog } from "./components/SearchDialog";
-import { SearchButton, Sidebar, SidebarToggle } from "./components/Sidebar";
+import { LearningMapButton, SearchButton, Sidebar, SidebarToggle } from "./components/Sidebar";
 import { ThreadBackdrop, Transcript } from "./components/Transcript";
 import { MODE_UI } from "./modes";
 import { RUNTIME_UI } from "./runtimes";
@@ -21,6 +22,7 @@ export function App() {
   const runtimes = usePeer((s) => s.runtimes);
   const providersOpen = usePeer((s) => s.providersOpen);
   const settingsOpen = usePeer((s) => s.settingsOpen);
+  const learningMapOpen = usePeer((s) => s.learningMapOpen);
   const runtime = runtimeInfo({ runtimes }, kind).status;
   const [fatal, setFatal] = useState<string | null>(null);
   // Closed until the developer opens it from the header: the panel never opens on its own.
@@ -31,9 +33,16 @@ export function App() {
   // ⌘K / Ctrl+K opens search from anywhere (and closes it again).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k") {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      const key = e.key.toLowerCase();
+      if (key === "k") {
         e.preventDefault();
         setSearchOpen((open) => !open);
+      } else if (key === "g") {
+        // ⌘G / Ctrl+G opens and closes the learning map.
+        e.preventDefault();
+        const { learningMapOpen, setLearningMapOpen } = usePeer.getState();
+        setLearningMapOpen(!learningMapOpen);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -107,6 +116,7 @@ export function App() {
           <div className="absolute left-3 top-3 z-20 flex items-center gap-0.5">
             <SidebarToggle open={false} onToggle={() => setSidebarOpen(true)} />
             <SearchButton onSearch={() => setSearchOpen(true)} />
+            <LearningMapButton />
           </div>
         )}
         {runtime.state !== "ready" && (
@@ -153,10 +163,12 @@ export function App() {
           </div>
         )}
 
-        {snapshot ? (
+        {learningMapOpen ? (
+          <LearningMapView sidebarOpen={sidebarOpen} />
+        ) : snapshot ? (
           <div className="relative flex min-h-0 flex-1 flex-col">
             <ThreadBackdrop />
-            <header className={`relative flex items-center gap-4 border-b border-line/70 py-3 pr-6 ${sidebarOpen ? "pl-6" : "pl-20"}`}>
+            <header className={`relative flex items-center gap-4 border-b border-line/70 py-3 pr-6 ${sidebarOpen ? "pl-6" : "pl-28"}`}>
               <div className="min-w-[9rem] flex-1">
                 <div className="truncate text-[14px] font-medium">{snapshot.session.title}</div>
                 {workspace?.general ? (

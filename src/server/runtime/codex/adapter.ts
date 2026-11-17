@@ -88,6 +88,7 @@ const CHECKPOINT_SPEC = {
         items: { type: "object", properties: { label: { type: "string" }, description: { type: "string" } }, required: ["label"] },
       },
       recommendation: { type: "string", description: "The option label you recommend, if any." },
+      topics: { type: "array", items: { type: "string" }, description: "1-3 concepts the question is about, for the developer's learning map." },
     },
     required: ["category", "question"],
   },

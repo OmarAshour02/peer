@@ -45,6 +45,13 @@ interface PeerState {
   providersVersion: number;
   /** The "Runtime settings" dialog (CLI paths, permission mode, effort). */
   settingsOpen: boolean;
+  /** The learning map fills the main view; opening a session closes it. */
+  learningMapOpen: boolean;
+  /**
+   * Bumped when topics are recorded, a question is resolved, or settings clear the map or switch
+   * tagging: an open map reloads.
+   */
+  learningMapVersion: number;
 
   init(api: PeerApi): Promise<void>;
   selectWorkspace(id: string | null): Promise<void>;
@@ -59,6 +66,7 @@ interface PeerState {
   setNotice(notice: string | null): void;
   setProvidersOpen(open: boolean): void;
   setSettingsOpen(open: boolean): void;
+  setLearningMapOpen(open: boolean): void;
 }
 
 /**
@@ -119,6 +127,8 @@ export const usePeer = create<PeerState>((set, get) => ({
   providersOpen: false,
   providersVersion: 0,
   settingsOpen: false,
+  learningMapOpen: false,
+  learningMapVersion: 0,
 
   async init(api) {
     set({ api });
@@ -149,7 +159,7 @@ export const usePeer = create<PeerState>((set, get) => ({
   async selectWorkspace(id) {
     const { api } = get();
     if (!api) return;
-    set({ activeWorkspaceId: id, sessions: [], models: null, modelsFor: null, modelsError: null });
+    set({ activeWorkspaceId: id, sessions: [], models: null, modelsFor: null, modelsError: null, learningMapOpen: false });
     if (!id) return get().selectSession(null);
     const sessions = await api.sessions(id);
     set({ sessions });
@@ -182,7 +192,7 @@ export const usePeer = create<PeerState>((set, get) => ({
     // Freshness belongs to one viewing of a session: coming back to it (even mid-turn) shows the
     // text it already has at once.
     freshParts.clear();
-    set({ activeSessionId: id, snapshot: null, messages: [], diff: [], notice: null });
+    set({ activeSessionId: id, snapshot: null, messages: [], diff: [], notice: null, learningMapOpen: false });
     if (id) await get().resync();
   },
 
@@ -208,6 +218,8 @@ export const usePeer = create<PeerState>((set, get) => ({
     if (pendingTheme()) void syncPendingTheme(async (theme) => { await api.setPreferences({ theme }); });
     // Providers may have changed while events were missed: refresh an open dialog and the model list.
     set((s) => ({ providersVersion: s.providersVersion + 1 }));
+    // Topic updates sent while disconnected are not replayed: an open learning map reloads.
+    set((s) => ({ learningMapVersion: s.learningMapVersion + 1 }));
     await api
       .health()
       .then((h) => set({ runtimes: h.runtimes, newRuntime: pickDefaultRuntime(get().runtimeChosen, h.runtimes) }))
@@ -232,8 +244,17 @@ export const usePeer = create<PeerState>((set, get) => ({
     set({ settingsOpen: open });
   },
 
+  setLearningMapOpen(open) {
+    set({ learningMapOpen: open });
+  },
+
   handleEvent(event) {
     const s = get();
+    // The open learning map reloads when topics are recorded, or a tagged question is answered.
+    if (event.type === "learningMap.updated" || (event.type === "checkpoint.updated" && event.checkpoint.status !== "pending")) {
+      set({ learningMapVersion: s.learningMapVersion + 1 });
+    }
+    if (event.type === "learningMap.updated") return;
     switch (event.type) {
       case "runtime.status": {
         const others = s.runtimes.filter((r) => r.kind !== event.runtime);

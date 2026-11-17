@@ -70,6 +70,9 @@ describe("store", () => {
       ALTER TABLE sessions DROP COLUMN approach_gate;
       ALTER TABLE sessions DROP COLUMN yolo;
       ALTER TABLE workspaces DROP COLUMN general;
+      DROP TABLE topic_links;
+      DROP TABLE topic_mentions;
+      DROP TABLE topics;
       PRAGMA user_version = 2;
     `);
     a.db.prepare("INSERT INTO turns (id, session_id, mode, intent, gate, started_at) VALUES ('turn_old', ?, 'learn', 'default', 'open', 1)").run(s.id);
@@ -90,6 +93,9 @@ describe("store", () => {
     expect(b.getSession(s.id)!.yolo).toBe(false);
     expect(b.getSession(s.id)!.discussing).toBe(false);
     expect(b.getTurn("turn_old")!.relockedAt).toBeNull();
+    // The learning map starts empty on an upgraded database, and on by default.
+    expect(b.listTopicMentions()).toEqual([]);
+    expect(b.getPreferences().learningMap).toBe(true);
     // Checkpoints from before Peer opened its own are the agent's.
     expect(b.getCheckpoint("cp_old")).toMatchObject({ source: "agent", decision: null });
     const again = b.createTurn({ sessionId: s.id, mode: "learn", intent: "default", gate: "open", continuedFrom: first.id });

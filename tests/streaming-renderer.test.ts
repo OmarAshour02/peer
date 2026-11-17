@@ -281,6 +281,33 @@ describe("transcript scroll while a reply streams", () => {
     expect(scroller.scrollTop).toBe(H.scroll - H.client);
   });
 
+  it("content that shrinks to the end while scrolled up hides the jump button and follows again", async () => {
+    const { scroller, user, grow, jump } = await mountTranscript();
+    await user(-300);
+    expect(jump()).not.toBeNull();
+    // The reply finishes: "Working…" goes, a diagram replaces its source. The browser clamps the
+    // scroll position to the new end; the developer is at the bottom without scrolling down.
+    await act(async () => {
+      H.scroll -= 400;
+      scroller.scrollTop = scroller.scrollTop;
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    expect(jump()).toBeNull();
+    await grow(200);
+    expect(scroller.scrollTop).toBe(H.scroll - H.client);
+  });
+
+  it("a shrink with no scroll event (seen only as a resize) also hides the button", async () => {
+    const { scroller, user, grow, jump } = await mountTranscript();
+    await user(-300);
+    await act(async () => {
+      H.scroll -= 400;
+      scroller.scrollTop = scroller.scrollTop;
+    });
+    await grow(0);
+    expect(jump()).toBeNull();
+  });
+
   it("Jump to latest returns to the end and follows again", async () => {
     const { scroller, user, grow, jump } = await mountTranscript();
     await user(-500);

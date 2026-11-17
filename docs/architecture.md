@@ -129,6 +129,14 @@ Ad-hoc builds are not notarized. A browser-downloaded DMG gets a quarantine flag
 
 **Releases.** Pushing a `v*` tag runs the full package matrix, uploads the installers, and drafts a GitHub release (`release` job in `ci.yml`). The job checks that the tag matches `package.json`, requires `docs/releases/<version>.md` as the release notes, adds `install.sh` and `SHA256SUMS.txt`, and marks versions containing `-` as prereleases. A human publishes the draft.
 
+## Learning map
+
+`src/server/collaboration/topics.ts`, `src/shared/topics.ts`, `src/renderer/components/LearningMap.tsx`. While `preferences.learningMap` is on (default), the turn prompt asks the agent to end the reply that finishes its turn with `<!-- peer-topics: [{"name", "level", "related"}] -->` and to put `topics` on its checkpoint questions (all four runtimes; it is only text, so Gemini works too). When a turn ends, the engine reads the turn's assistant messages from the runtime (`getMessages`, created between the turn's start and end) and records the note. The renderer strips the note from text parts, including a partial one while it streams. No extra model call is made.
+
+Tables: `topics` (one per normalized key: case, spacing and hyphens don't make a new topic; the first name stays), `topic_mentions` (topic, session, turn, optional checkpoint, level) and `topic_links` (topics the agent named as related, per turn). Mentions and links cascade with their session and are hidden while their turn is undone.
+
+Levels are capped by what Peer saw (`levelCap`): the agent's claim stands only up to "engaged" when the developer answered, chose or discussed one of the agent's questions in the task, or wrote the task's message themselves (intent `default` or `discuss`); "demonstrated" also needs no hint or direct answer in the task or the turn just before it. A topic on a question becomes "engaged" when the developer answers, chooses or discusses it. `GET /api/learning-map` builds the graph at read time: links are the related pairs plus topics mentioned in the same turn. `DELETE /api/learning-map` clears it. The prompt lists only the current session's topic names, so topics never reach the agent across sessions.
+
 ## Learning events (future Learning Space)
 
 `collaboration_events` is an append-only log per session:
@@ -138,4 +146,4 @@ Ad-hoc builds are not notarized. A browser-downloaded DMG gets a quarantine flag
 - `decision.noted`, `decision.reused` (a detected decision recorded without asking, or one already decided)
 - `gate.blocked`, `mode.changed`, `permission.*`, `runtime.error`
 
-Together with the runtime transcript, this is the capture point for conversation-derived learning. See [roadmap.md](roadmap.md). No learning data model is built yet, on purpose. Cross-session adaptation derives from this log and the sessions table at read time (the last 20 hands-off signals and the recent mode/model habits since `preferences.memoryResetAt`, only while `crossSessionMemory` is on); no separate memory store exists.
+Together with the runtime transcript, this is the capture point for conversation-derived learning. See [roadmap.md](roadmap.md). Cross-session adaptation derives from this log and the sessions table at read time (the last 20 hands-off signals and the recent mode/model habits since `preferences.memoryResetAt`, only while `crossSessionMemory` is on); no separate memory store exists.

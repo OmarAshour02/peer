@@ -542,6 +542,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
               .optional()
               .describe("2-4 short options when there are discrete choices."),
             recommendation: z.string().optional().describe("The option label you recommend, if any."),
+            topics: z.array(z.string()).optional().describe("1-3 concepts the question is about, for the developer's learning map."),
           },
           async (args, extra) => {
             const callId = (extra as { _meta?: { "claudecode/toolUseId"?: string } } | undefined)?._meta?.["claudecode/toolUseId"] ?? null;

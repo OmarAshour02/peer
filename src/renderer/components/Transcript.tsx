@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Checkpoint, CollaborationModeId, PeerMessage, PeerPart } from "../../shared/types";
+import { stripTopicNotesInParts } from "../../shared/topics";
 import { isFreshPart, usePeer } from "../store";
 import { Constellation } from "./Constellation";
 import { CheckpointCard, PermissionCard } from "./Interactions";
@@ -63,6 +64,15 @@ export function useStickToBottom(sessionId: string | null, lastUserMessageId: st
     stick.current = on;
     setPinned(on);
   }, []);
+  /**
+   * At the very end: nothing is left to scroll to (sub-pixel slack). Content that shrinks while the
+   * developer was scrolled up (a finished reply drops its "Working…" line, a diagram replaces its
+   * source) can leave them there with no scroll down to re-pin, so this re-pins too.
+   */
+  const atEnd = useCallback(() => {
+    const sc = scroller.current;
+    return sc !== null && sc.scrollHeight - sc.scrollTop - sc.clientHeight <= 0.5;
+  }, []);
   const toBottom = useCallback(() => {
     const sc = scroller.current;
     if (!sc) return;
@@ -88,11 +98,12 @@ export function useStickToBottom(sessionId: string | null, lastUserMessageId: st
     if (!sc || !el || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => {
       if (stick.current) toBottom();
+      else if (atEnd()) pin(true);
     });
     ro.observe(el);
     ro.observe(sc);
     return () => ro.disconnect();
-  }, [hasScroller, toBottom]);
+  }, [hasScroller, toBottom, atEnd, pin]);
 
   const intent = () => {
     intentAt.current = performance.now();
@@ -114,7 +125,10 @@ export function useStickToBottom(sessionId: string | null, lastUserMessageId: st
       const top = sc.scrollTop;
       const gap = sc.scrollHeight - top - sc.clientHeight;
       const byDeveloper = performance.now() - intentAt.current < INTENT_MS;
-      if (byDeveloper && top < lastTop.current - 0.5) {
+      // At the very end nobody is scrolled up, whatever moved the view there.
+      if (gap <= 0.5) {
+        if (!stick.current) pin(true);
+      } else if (byDeveloper && top < lastTop.current - 0.5) {
         if (stick.current) pin(false);
       } else if (top > lastTop.current && gap <= NEAR_BOTTOM_PX) {
         if (!stick.current) pin(true);
@@ -231,12 +245,16 @@ function Message({ message, checkpoints, mode, live }: { message: PeerMessage; c
       </div>
     );
   }
+  // The learning map's topic note is for Peer, not the developer; it may span text parts.
+  const textParts = message.parts.filter((p): p is Extract<PeerPart, { type: "text" }> => p.type === "text" && !p.synthetic);
+  const shown = new Map(stripTopicNotesInParts(textParts.map((p) => p.text)).map((t, i) => [textParts[i]!.id, t]));
   return (
     <div className="my-3">
       {message.parts.map((p, i) => {
         const cp = checkpoints.get(p.id);
         if (cp) return <CheckpointCard key={p.id} checkpoint={cp} mode={mode} />;
-        return <PartView key={p.id} part={p} live={partIsLive(message.parts, i, live)} />;
+        const part = p.type === "text" && shown.has(p.id) ? { ...p, text: shown.get(p.id)! } : p;
+        return <PartView key={p.id} part={part} live={partIsLive(message.parts, i, live)} />;
       })}
       {message.error && message.error !== "Stopped." && (
         <div className="my-2 rounded-md border border-danger/60 bg-danger/10 px-3 py-2 text-[13px] text-danger">{message.error}</div>

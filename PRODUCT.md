@@ -39,7 +39,7 @@ Confirmed capabilities (see PEER.md for the binding specification):
 - Two modes, Collaborate (default) and Learn, with temporary per-task controls; the retired Focus mode still works for existing sessions.
 - Enforced gates: code changes lock in Learn until the developer engages (a go-ahead on a confirm checkpoint does not count), and under Discuss first / hint turns in any mode. Safety permissions (destructive commands, outside-workspace access) are separate and always apply.
 - Peer-detected decisions — adding a dependency, changing a public API contract, and (opt-in, Collaborate) a task's edits passing five files — pause the tool call before it runs.
-- Adaptive involvement: a per-turn question ceiling, narrowing after hands-off responses, no repeated questions, and cross-session memory (tendency and mode/model habits, on by default, local, resettable). Answers, decisions, and topics are not remembered across sessions.
+- Adaptive involvement: a per-turn question ceiling, narrowing after hands-off responses, no repeated questions, and cross-session memory (tendency and mode/model habits, on by default, local, resettable). Answers, decisions, and topics are not remembered across sessions (the learning map shows topics to the developer, never to the agent).
 - Undo that reverts a turn's files and truncates the CLI conversation where the runtime supports it.
 
 Constraints future work must preserve:

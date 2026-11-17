@@ -186,6 +186,30 @@ export function mermaidSource(pre: HastNode | undefined): string | null {
   return isMermaid ? hastText(code).replace(/\n$/, "") : null;
 }
 
+type Positioned = { position?: { start?: { offset?: number }; end?: { offset?: number } } };
+
+/**
+ * Whether a code block's closing fence is in `text`: while a reply streams, an unclosed fence runs
+ * to the end of what has arrived (or of its blockquote or list item), and its source is still
+ * partial. Decided from what the parser made of it, so container markers and fence-like lines
+ * inside the code can't fool it: a closed block's source is its content plus exactly two lines,
+ * the opening fence and a closing fence; an unclosed one has no closing line.
+ */
+export function fenceClosed(text: string, pre: (HastNode & Positioned) | undefined): boolean {
+  const start = pre?.position?.start?.offset;
+  const end = pre?.position?.end?.offset;
+  const code = pre?.children?.find((c) => c.type === "element" && c.tagName === "code");
+  if (start === undefined || end === undefined || !code) return false;
+  // Markdown line endings: \n, \r\n or a bare \r.
+  const lines = text.slice(start, end).split(/\r\n|\r|\n/);
+  // Container prefixes (blockquote markers, list indentation) come before a fence on its line.
+  const close = /^[\s>]*(`{3,}|~{3,})\s*$/.exec(lines[lines.length - 1]!);
+  if (lines.length < 2 || !close) return false;
+  const value = hastText(code).replace(/(\r\n|\r|\n)$/, "");
+  const contentLines = value === "" ? 0 : value.split(/\r\n|\r|\n/).length;
+  return lines.length === contentLines + 2;
+}
+
 type MdNode = { type: string; value?: string; children?: MdNode[]; position?: { start: { offset?: number } } };
 
 /** A display math node, shaped as remark-math builds one for a `$$` fence. */
@@ -229,16 +253,24 @@ const Markdown = memo(function Markdown({ text, streaming, settled }: { text: st
     () => [KATEX, [rehypeStreamWords, { settled }] as [typeof rehypeStreamWords, { settled: Settled }]],
     [settled],
   );
-  // A diagram renders once its reply is complete; while it streams, its source is still partial.
+  // A diagram renders as soon as its closing fence arrives, while the rest of the reply streams on;
+  // until then its source is partial and shows as code. The renderer stays the same component for
+  // the whole reply (it reads the text and the streaming state from refs), so a diagram already on
+  // screen is not redrawn when the reply finishes.
+  const textRef = useRef(text);
+  const streamingRef = useRef(streaming);
+  textRef.current = text;
+  streamingRef.current = streaming;
   const components = useMemo<Components>(
     () => ({
       pre({ node, children, ...props }) {
-        const source = streaming ? null : mermaidSource(node as HastNode | undefined);
+        const complete = !streamingRef.current || fenceClosed(textRef.current, node as (HastNode & Positioned) | undefined);
+        const source = complete ? mermaidSource(node as HastNode | undefined) : null;
         if (source !== null) return <MermaidDiagram source={source} />;
         return <pre {...props}>{children as ReactNode}</pre>;
       },
     }),
-    [streaming],
+    [],
   );
   return (
     <ReactMarkdown remarkPlugins={REMARK} rehypePlugins={streaming ? rehype : [KATEX]} components={components}>

@@ -431,6 +431,12 @@ export interface Preferences {
   memoryResetAt: number;
   /** The collaboration-event id at the last reset: event-derived memory counts only later events, even within the same millisecond. */
   memoryResetEventId: number;
+  /**
+   * The learning map: the agent tags the concepts each turn dealt with (a hidden note at the end of
+   * its reply, and topics on its checkpoint questions), and Peer draws them as a graph. On by
+   * default; local only. Topics are never sent back to the agent in another session.
+   */
+  learningMap: boolean;
 }
 
 /** Claude Code's permission mode for turns without session auto-approvals. */
@@ -466,6 +472,48 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
 };
 
 // ---------------------------------------------------------------------------
+// Learning map
+
+/**
+ * How far the developer went with a concept, lowest first.
+ * - encountered: it came up in a turn.
+ * - engaged: the developer reasoned about it themselves (answered a question tagged with it in their
+ *   own words or by choosing, or the agent says they did in a turn they wrote).
+ * - demonstrated: their own reasoning about it was right, in a turn with no hint or direct answer.
+ */
+export const TOPIC_LEVELS = ["encountered", "engaged", "demonstrated"] as const;
+export type TopicLevel = (typeof TOPIC_LEVELS)[number];
+
+export interface LearningMapTopic {
+  id: string;
+  name: string;
+  /** The highest level across every mention. */
+  level: TopicLevel;
+  /** Turns and questions that mentioned it. */
+  mentions: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  /** Sessions that talked about it, most recent mention first. */
+  sessions: { sessionId: string; mentions: number; level: TopicLevel; lastAt: number }[];
+}
+
+export interface LearningMapLink {
+  source: string;
+  target: string;
+  /** Turns that tied the two together (named as related, or discussed in the same turn). */
+  weight: number;
+  /** The agent named one as related to the other (not only discussed in the same turn). */
+  related: boolean;
+}
+
+export interface LearningMap {
+  topics: LearningMapTopic[];
+  links: LearningMapLink[];
+  /** The sessions topics point to, by id. */
+  sessions: Record<string, PeerSession & { workspaceName: string; general: boolean }>;
+}
+
+// ---------------------------------------------------------------------------
 // Events pushed to the renderer over SSE
 
 export type PeerEvent =
@@ -484,4 +532,6 @@ export type PeerEvent =
   | { type: "checkpoint.updated"; checkpoint: Checkpoint }
   | { type: "gate.updated"; sessionId: string; gate: GateState }
   | { type: "permission.asked"; request: PermissionRequest }
-  | { type: "permission.replied"; sessionId: string; requestId: string };
+  | { type: "permission.replied"; sessionId: string; requestId: string }
+  /** Topics were recorded (a turn's note was read, or a question was tagged): an open map reloads. */
+  | { type: "learningMap.updated" };

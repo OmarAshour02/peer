@@ -1,5 +1,6 @@
 import type { CheckpointCategory, DecisionKind } from "../../shared/types.js";
 import { CHAT_INLINE_CATEGORIES, SHARED_PRINCIPLES, type EffectivePolicy } from "./policies.js";
+import { TOPIC_NOTE_PREFIX } from "../../shared/topics.js";
 
 /** Default checkpoint tool name; runtimes that namespace tools (Claude Code's MCP) report their own. */
 export const CHECKPOINT_TOOL = "peer_checkpoint";
@@ -45,6 +46,23 @@ export interface PromptContext {
   approachGateThreshold?: number;
   /** A general chat: not tied to a project; the working directory is Peer's scratch folder. */
   generalChat?: boolean;
+  /** The learning map is on: the agent tags the turn's concepts. Names already used in this session. */
+  learningMap?: { sessionTopics: readonly string[] };
+}
+
+/** How the agent tags a turn's concepts for the learning map (the note Peer reads and hides). */
+export function learningMapInstructions(tool: string, sessionTopics: readonly string[]): string[] {
+  return [
+    "## Learning map",
+    "Peer keeps a map of the concepts the developer has worked through. End the reply that finishes your turn with one line Peer reads and hides from the developer, for example:",
+    `${TOPIC_NOTE_PREFIX} [{"name": "Sliding window rate limiting", "level": "engaged", "related": ["Redis sorted sets"]}] -->`,
+    "- name: an engineering concept the turn dealt with (a technique, mechanism, principle or design idea), in 1-5 words. Not file names, task names, commands or tools. List 0-4 topics; use [] for small talk or purely mechanical work.",
+    '- level: "encountered" (it came up), "engaged" (the developer reasoned about it themselves: explained, predicted, or chose with a reason), "demonstrated" (their own reasoning about it was correct, without hints). When unsure, use the lower level, and never credit the developer with your reasoning.',
+    "- related: other concepts, in this line or earlier ones, that this one builds on or connects to.",
+    `- Reuse a name exactly when the same concept comes up again. When you ask with \`${tool}\`, put the 1-3 concepts the question is about in its \`topics\` argument, with the same names.`,
+    ...(sessionTopics.length > 0 ? [`- Names already used in this conversation: ${sessionTopics.map((n) => JSON.stringify(n)).join(", ")}.`] : []),
+    "",
+  ];
 }
 
 /**
@@ -113,6 +131,7 @@ export function composeSystemPrompt(plan: EffectivePolicy, tool: string = CHECKP
         ]
       : []),
     "",
+    ...(context.learningMap ? learningMapInstructions(tool, context.learningMap.sessionTopics) : []),
     "## Formatting",
     "Peer renders your replies (and a checkpoint's context) as Markdown, including ```mermaid diagrams and LaTeX math between $...$ (inline) or $$...$$ (display). Write a literal dollar sign as \\$ outside code. Leave diagram colors to Peer (it themes them for light and dark); to highlight a path or nodes, prefer labels or a dotted/thick link over classDef or style colors.",
     "",

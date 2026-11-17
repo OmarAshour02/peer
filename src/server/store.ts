@@ -19,6 +19,8 @@ import {
   type UiTheme,
   type RuntimeKind,
   type RuntimeSettings,
+  TOPIC_LEVELS,
+  type TopicLevel,
   type Turn,
   type TurnIntent,
   type Workspace,
@@ -151,6 +153,37 @@ const MIGRATIONS: string[] = [
   `
   -- General chat: Peer's own folder for chats that don't belong to a project.
   ALTER TABLE workspaces ADD COLUMN general INTEGER NOT NULL DEFAULT 0;
+  `,
+  `
+  -- The learning map: concepts the agent tagged, and where they came up. Mentions and links belong
+  -- to a session (deleting it removes them) and usually a turn (undoing it hides them).
+  CREATE TABLE topics (
+    id TEXT PRIMARY KEY,
+    key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE topic_mentions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    turn_id TEXT,
+    -- A question the agent tagged with the topic; its level follows the developer's response.
+    checkpoint_id TEXT,
+    level TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX topic_mentions_unique ON topic_mentions(topic_id, session_id, COALESCE(turn_id, ''), COALESCE(checkpoint_id, ''));
+  CREATE INDEX topic_mentions_session ON topic_mentions(session_id);
+  -- Topics the agent named as related, per turn (a, b in id order).
+  CREATE TABLE topic_links (
+    a TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    b TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    turn_id TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX topic_links_unique ON topic_links(a, b, session_id, COALESCE(turn_id, ''));
   `,
 ];
 
@@ -603,6 +636,119 @@ export class Store {
     return Number(row?.max_id ?? 0);
   }
 
+  // -- learning map ----------------------------------------------------------
+
+  /** The topic for a key, created with `name` on first use (the first name a concept got stays). */
+  ensureTopic(key: string, name: string): string {
+    const existing = this.topicIdByKey(key);
+    if (existing) return existing;
+    const id = newId("topic");
+    this.db.prepare("INSERT INTO topics (id, key, name, created_at) VALUES (?, ?, ?, ?)").run(id, key, name, Date.now());
+    return id;
+  }
+
+  topicIdByKey(key: string): string | null {
+    const row = this.db.prepare("SELECT id FROM topics WHERE key = ?").get(key);
+    return row ? String(row.id) : null;
+  }
+
+  /** Record that a topic came up; a repeat in the same turn (or question) keeps the higher level. */
+  addTopicMention(input: { topicId: string; sessionId: string; turnId: string | null; checkpointId: string | null; level: TopicLevel }) {
+    const existing = this.db
+      .prepare("SELECT id, level FROM topic_mentions WHERE topic_id = ? AND session_id = ? AND COALESCE(turn_id, '') = ? AND COALESCE(checkpoint_id, '') = ?")
+      .get(input.topicId, input.sessionId, input.turnId ?? "", input.checkpointId ?? "");
+    if (existing) {
+      if (TOPIC_LEVELS.indexOf(input.level) > TOPIC_LEVELS.indexOf(existing.level as TopicLevel)) {
+        this.db.prepare("UPDATE topic_mentions SET level = ? WHERE id = ?").run(input.level, Number(existing.id));
+      }
+      return;
+    }
+    this.db
+      .prepare("INSERT INTO topic_mentions (topic_id, session_id, turn_id, checkpoint_id, level, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(input.topicId, input.sessionId, input.turnId, input.checkpointId, input.level, Date.now());
+  }
+
+  addTopicLink(x: string, y: string, sessionId: string, turnId: string | null) {
+    if (x === y) return;
+    const [a, b] = x < y ? [x, y] : [y, x];
+    this.db
+      .prepare("INSERT OR IGNORE INTO topic_links (a, b, session_id, turn_id, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(a, b, sessionId, turnId, Date.now());
+  }
+
+  /**
+   * Every mention on a kept turn (undone turns are left out), with its topic and, for a tagged
+   * question, the developer's response. Oldest first.
+   */
+  listTopicMentions(): {
+    topicId: string;
+    name: string;
+    sessionId: string;
+    turnId: string | null;
+    level: TopicLevel;
+    createdAt: number;
+    checkpoint: { source: string; resolution: CheckpointResolution | null } | null;
+  }[] {
+    return this.db
+      .prepare(
+        `SELECT m.topic_id, t.name, m.session_id, m.turn_id, m.level, m.created_at, cp.source AS cp_source, cp.resolution AS cp_resolution, m.checkpoint_id
+         FROM topic_mentions m
+         JOIN topics t ON t.id = m.topic_id
+         LEFT JOIN checkpoints cp ON cp.id = m.checkpoint_id
+         WHERE m.turn_id IS NULL OR NOT EXISTS (SELECT 1 FROM turns tu WHERE tu.id = m.turn_id AND tu.undone_at IS NOT NULL)
+         ORDER BY m.id`,
+      )
+      .all()
+      .map((r) => ({
+        topicId: String(r.topic_id),
+        name: String(r.name),
+        sessionId: String(r.session_id),
+        turnId: r.turn_id == null ? null : String(r.turn_id),
+        level: (TOPIC_LEVELS.includes(r.level as TopicLevel) ? r.level : "encountered") as TopicLevel,
+        createdAt: Number(r.created_at),
+        checkpoint:
+          r.checkpoint_id == null
+            ? null
+            : { source: String(r.cp_source ?? "agent"), resolution: r.cp_resolution == null ? null : (JSON.parse(String(r.cp_resolution)) as CheckpointResolution) },
+      }));
+  }
+
+  /** Related-topic links on kept turns. */
+  listTopicLinks(): { a: string; b: string; turnId: string | null }[] {
+    return this.db
+      .prepare(
+        `SELECT a, b, turn_id FROM topic_links l
+         WHERE l.turn_id IS NULL OR NOT EXISTS (SELECT 1 FROM turns tu WHERE tu.id = l.turn_id AND tu.undone_at IS NOT NULL)`,
+      )
+      .all()
+      .map((r) => ({ a: String(r.a), b: String(r.b), turnId: r.turn_id == null ? null : String(r.turn_id) }));
+  }
+
+  /** Topic names already tagged in a session (kept turns), oldest first: the agent reuses them. */
+  sessionTopicNames(sessionId: string): string[] {
+    return this.db
+      .prepare(
+        `SELECT t.name, MIN(m.id) AS first FROM topic_mentions m JOIN topics t ON t.id = m.topic_id
+         WHERE m.session_id = ? AND (m.turn_id IS NULL OR NOT EXISTS (SELECT 1 FROM turns tu WHERE tu.id = m.turn_id AND tu.undone_at IS NOT NULL))
+         GROUP BY t.id ORDER BY first`,
+      )
+      .all(sessionId)
+      .map((r) => String(r.name));
+  }
+
+  /** Bumped by every clear: a topic read that started before it must not write afterwards. */
+  private mapGeneration = 0;
+
+  learningMapGeneration(): number {
+    return this.mapGeneration;
+  }
+
+  /** Remove every topic, mention and link (the map starts over). */
+  clearLearningMap() {
+    this.mapGeneration++;
+    this.db.exec("DELETE FROM topic_links; DELETE FROM topic_mentions; DELETE FROM topics;");
+  }
+
   // -- preferences -----------------------------------------------------------
 
   getPreferences(): Preferences {
@@ -623,6 +769,7 @@ export class Store {
       crossSessionMemory: (get("crossSessionMemory") as boolean | undefined) ?? true,
       memoryResetAt: (get("memoryResetAt") as number | undefined) ?? 0,
       memoryResetEventId: (get("memoryResetEventId") as number | undefined) ?? 0,
+      learningMap: (get("learningMap") as boolean | undefined) ?? true,
     };
   }
 
@@ -698,6 +845,7 @@ export class Store {
     if (prefs.runtimeSettings) put.run("runtimeSettings", JSON.stringify({ ...DEFAULT_RUNTIME_SETTINGS, ...prefs.runtimeSettings }));
     if (prefs.theme !== undefined) put.run("theme", JSON.stringify(prefs.theme));
     if (prefs.crossSessionMemory !== undefined) put.run("crossSessionMemory", JSON.stringify(prefs.crossSessionMemory));
+    if (prefs.learningMap !== undefined) put.run("learningMap", JSON.stringify(prefs.learningMap));
     if (prefs.memoryResetAt !== undefined) put.run("memoryResetAt", JSON.stringify(prefs.memoryResetAt));
     // A reset also moves the event-id watermark to now, unless the caller set it explicitly:
     // history in the same millisecond after the reset still counts.

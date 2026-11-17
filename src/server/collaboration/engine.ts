@@ -29,6 +29,8 @@ import { isGoAhead, parseIntent } from "./intent.js";
 import { CHAT_INLINE_CATEGORIES, INTENT_LABELS, getPolicy, resolveEffectivePolicy, type PolicyContext } from "./policies.js";
 import { composeSystemPrompt } from "./prompt.js";
 import { isReadOnlyTool } from "./tool-classification.js";
+import { recordCheckpointTopics, recordTurnTopics } from "./topics.js";
+import { parseTopicNames } from "../../shared/topics.js";
 
 export class EngineError extends Error {
   constructor(
@@ -46,6 +48,8 @@ export interface CheckpointRequest {
   context?: unknown;
   options?: unknown;
   recommendation?: unknown;
+  /** Concepts the question is about, for the learning map. */
+  topics?: unknown;
 }
 
 /**
@@ -142,6 +146,8 @@ export class CollaborationEngine {
    * so nothing the developer does after Peer shows it idle can be mistaken for the agent's work.
    */
   private readonly finishing = new Map<string, Promise<void>>();
+  /** Turn id -> its topic note being read (the learning map). */
+  private readonly topicReads = new Map<string, Promise<void>>();
 
   constructor(
     private readonly store: Store,
@@ -377,6 +383,7 @@ export class CollaborationEngine {
         previousTurnLocked: previous !== null && (previous.gate !== "open" || previous.relockedAt !== null),
         approachGateThreshold: session.approachGate && session.mode === "collaborate" ? APPROACH_GATE_FILE_THRESHOLD : undefined,
         generalChat: this.isGeneralChat(session),
+        learningMap: this.store.getPreferences().learningMap ? { sessionTopics: this.store.sessionTopicNames(session.id).slice(-20) } : undefined,
       });
       await runtime.prompt(directory, session.runtimeSessionId, {
         text,
@@ -421,6 +428,7 @@ export class CollaborationEngine {
     if (!turn || turn.endedAt !== null) return;
     this.store.endTurn(turn.id);
     this.recordTurnEnd(sessionId, turn.id);
+    this.collectTopics(sessionId, turn.id);
     // A checkpoint cannot outlive its run.
     for (const cp of this.store.listCheckpointsForTurn(turn.id)) {
       if (cp.status === "pending" && !this.live.has(cp.id)) {
@@ -762,6 +770,25 @@ export class CollaborationEngine {
   }
 
   async requestCheckpoint(
+    runtimeSessionId: string,
+    callId: string | null,
+    request: CheckpointRequest,
+  ): Promise<{ checkpoint: Checkpoint | null; output: string | null }> {
+    const result = await this.openCheckpoint(runtimeSessionId, callId, request);
+    // The learning map: a question tagged with concepts puts them on the map; the developer's
+    // response decides how far they engaged. Routine work is not a question about anything.
+    const cp = result.checkpoint;
+    if (cp && cp.category !== "routine" && this.store.getPreferences().learningMap) {
+      const names = parseTopicNames(request.topics);
+      if (names.length > 0) {
+        recordCheckpointTopics(this.store, cp.sessionId, cp.turnId, cp.id, names);
+        this.emit({ type: "learningMap.updated" });
+      }
+    }
+    return result;
+  }
+
+  private async openCheckpoint(
     runtimeSessionId: string,
     callId: string | null,
     request: CheckpointRequest,
@@ -1141,6 +1168,37 @@ export class CollaborationEngine {
         if (this.finishing.get(sessionId) === done) this.finishing.delete(sessionId);
       });
     this.finishing.set(sessionId, done);
+  }
+
+  /**
+   * The learning map: read the topic note the agent ended the turn with. The runtime has saved the
+   * turn's messages before it reports idle; this runs after the end snapshot so it never delays it.
+   */
+  private collectTopics(sessionId: string, turnId: string) {
+    const session = this.store.getSession(sessionId);
+    if (!session || !this.store.getPreferences().learningMap) return;
+    // A clear after the turn ended removes its topics too, even if they are still being read.
+    const generation = this.store.learningMapGeneration();
+    const done = (async () => {
+      await this.finishing.get(sessionId);
+      const turn = this.store.getTurn(turnId);
+      if (!turn || turn.undoneAt !== null) return;
+      const messages = await this.runtimes.get(session.runtime).getMessages(this.directoryOf(session), session.runtimeSessionId);
+      // Checked again after the read: the turn was undone, the map cleared, or tagging turned off
+      // meanwhile, and nothing from it goes on the map.
+      if (this.store.getTurn(turnId)?.undoneAt != null) return;
+      if (this.store.learningMapGeneration() !== generation || !this.store.getPreferences().learningMap) return;
+      if (recordTurnTopics(this.store, sessionId, turn, messages) > 0) this.emit({ type: "learningMap.updated" });
+    })().catch(() => {
+      // Peer may be shutting down (store closed), or the runtime went away: the turn has no topics.
+    });
+    this.topicReads.set(turnId, done);
+    void done.finally(() => this.topicReads.delete(turnId));
+  }
+
+  /** Resolves once the topics of every turn that has ended are recorded (tests, shutdown). */
+  async topicsSettled(): Promise<void> {
+    while (this.topicReads.size > 0) await Promise.all([...this.topicReads.values()]);
   }
 
   /** The turns one undo takes back: the latest kept turn, and the turns a continuation carried on. */
