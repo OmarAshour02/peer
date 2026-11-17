@@ -127,7 +127,15 @@ jobs:
 
       - name: Install runtime dependencies for headless Electron (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb libnss3 libgbm1 libasound2t64 libgtk-3-0t64 libfuse2t64
+        run: sudo apt-get update && sudo apt-get install -y xvfb libnss3 libgbm1 libasound2t64 libgtk-3-0t64
+
+      # The runner has developer packages a user's desktop lacks (the legacy AppImage runtime once
+      # needed libz.so from zlib1g-dev on arm64), and the host smoke tests pass --no-sandbox. So also
+      # run the AppImage in a bare Ubuntu: only Electron's runtime libraries and Xvfb, no FUSE, no dev
+      # packages, as a normal user, launched through its own AppRun without --no-sandbox.
+      - name: AppImage runs on a clean Ubuntu (Linux)
+        if: runner.os == 'Linux'
+        run: docker run --rm -v "$PWD/release:/r:ro" -v "$PWD/scripts/clean-ubuntu-appimage-smoke.sh:/check.sh:ro" ubuntu:24.04 bash /check.sh
 
       - name: Smoke test unpacked app (Linux)
         if: runner.os == 'Linux'
