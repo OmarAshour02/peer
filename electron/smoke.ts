@@ -7,6 +7,7 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } fr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nativeTheme, type BrowserWindow } from "electron";
+import { captureWithRetry } from "./capture-retry.js";
 import type { PeerServer } from "../src/server/server.js";
 import type { ModelsResponse, PeerSession, SessionSnapshot, Workspace } from "../src/shared/types.js";
 
@@ -130,7 +131,7 @@ export async function runSmokeTest(peer: PeerServer, openWindow: () => BrowserWi
     // Pixel-level proof, not just computed style: sample the captured frame.
     // Bottom-left is the sidebar (nav surface); the transcript's left edge is the main ground.
     const frame = async () => {
-      const img = await win!.capturePage();
+      const img = await captureWithRetry(() => win!.capturePage());
       const size = img.getSize();
       return { ...size, bmp: img.toBitmap() }; // BGRA
     };
