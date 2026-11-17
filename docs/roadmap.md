@@ -58,7 +58,7 @@
    - Show checkpoint history per file.
    - Redo after undo (OpenCode has `unrevert`; others would restore the turn's end tree).
 6. **Model handling.** Per-mode default models. Per-model context limits for local models (OpenCode compacts by them).
-7. **Updates.** Auto-update via electron-builder (zip + `latest-mac.yml` / AppImage update info). Publish signed builds from tagged CI runs.
+7. **Updates.** Auto-update via electron-builder (zip + `latest-mac.yml` / AppImage update info). Done: tagged CI runs draft a GitHub release with every installer, `install.sh` and checksums (ad-hoc signed on macOS). Not done: Developer ID signing and notarization (needs an Apple Developer account), and auto-update.
 
 ## Later: Learning Space
 

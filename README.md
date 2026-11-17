@@ -18,9 +18,21 @@ A coding agent can finish a task while leaving you disconnected from the decisio
 - **Catch decisions the agent might skip.** Peer detects certain new dependencies and public API edits before they run. An optional approach gate pauses a Collaborate task before its edits grow beyond five files.
 - **Keep the work inspectable.** Review the transcript, tool activity, and file changes, stop a running agent, or undo a turn where supported.
 
-Peer is under active development. Runtime capabilities differ; see [runtime limits](#runtime-limits) before relying on a gate.
+Peer is in **alpha**. Runtime capabilities differ; see [runtime limits](#runtime-limits) before relying on a gate.
 
-## Quick start
+## Install
+
+On macOS (Apple Silicon or Intel, macOS 13+) or Linux (x64 or arm64):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OmarAshour02/peer/main/scripts/install.sh | sh
+```
+
+The [script](scripts/install.sh) downloads the newest release for your machine, verifies it against the release's `SHA256SUMS.txt`, and installs it. On macOS it installs `Peer.app` into `/Applications` (or `~/Applications`); on Linux, it installs an AppImage, a `peer` command in `~/.local/bin`, and a desktop entry. Run it again to update. Set `PEER_VERSION=0.2.0-alpha.1` to install a specific version.
+
+You can also download a DMG, AppImage, or `.deb` from [Releases](https://github.com/OmarAshour02/peer/releases). Alpha macOS builds are ad-hoc signed, not notarized. If you open a DMG downloaded in a browser, macOS will say it can't verify the developer. Go to **System Settings → Privacy & Security → Open Anyway** once. The install script avoids that prompt.
+
+## Build from source
 
 You need **Node.js 22.13+**, npm, and Git on macOS or Linux. Supported build targets are Apple Silicon and Intel Macs, plus Linux x64 and arm64 with glibc. Windows is not currently a supported target.
 
@@ -171,7 +183,14 @@ Other runtime targets are `mac-x64` and `linux-arm64`. Installers are written to
 
 Run `npm run smoke:packaged` to check the packaged app; use `xvfb-run -a npm run smoke:packaged` on a headless Linux host. Signing and notarization configuration lives in [electron-builder.yml](electron-builder.yml) and the [distribution guide](docs/architecture.md#distribution).
 
-[CI](.github/workflows/ci.yml) checks the project and packages and smoke-tests all four platform targets. Installer artifacts are uploaded on manual workflow runs.
+[CI](.github/workflows/ci.yml) checks the project and packages and smoke-tests all four platform targets. Without Apple signing secrets, macOS builds are ad-hoc signed, which Apple Silicon requires to run them. Installer artifacts are uploaded on manual workflow runs.
+
+### Releasing
+
+1. Set the version in `package.json` (`npm version 0.2.0-alpha.2 --no-git-tag-version`) and add release notes at `docs/releases/<version>.md`.
+2. Merge to `main`, then push a matching tag: `git tag v0.2.0-alpha.2 && git push origin v0.2.0-alpha.2`.
+3. CI builds and smoke-tests all four targets, then creates a **draft** GitHub release. Versions with a `-` (such as `-alpha.2`) are marked as prereleases. The draft includes the installers, `install.sh`, and `SHA256SUMS.txt`. A tag that doesn't match `package.json` fails the release job.
+4. Review the draft and publish it. The install script only sees published releases.
 
 ## Further reading
 
@@ -182,4 +201,4 @@ Run `npm run smoke:packaged` to check the packaged app; use `xvfb-run -a npm run
 
 ## License
 
-This repository is currently marked `UNLICENSED` in `package.json`; no open-source license is provided.
+[MIT](LICENSE) © 2026 Omar Ashour

@@ -123,7 +123,11 @@ macOS signing and notarization use electron-builder:
 | `MAC_CERTIFICATE_PASSWORD` | → `CSC_KEY_PASSWORD` |
 | `APPLE_API_KEY_P8`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` | App Store Connect API key for notarization |
 
-Without secrets, CI builds unsigned apps and says so. When a certificate is present, CI verifies the result with `codesign --verify --deep --strict` and `spctl --assess`.
+Without secrets, CI signs macOS builds **ad-hoc** (`-c.mac.identity=-`) and says so. Apple Silicon refuses to run unsigned code, and an ad-hoc signature needs no Apple account. Electron's frameworks carry Apple's Team ID, so ad-hoc builds rely on the `disable-library-validation` entitlement, which is already in the entitlements file. CI verifies every macOS build, including the copy unpacked from the zip, with `codesign --verify --deep --strict`. With a certificate present, it also runs `spctl --assess`.
+
+Ad-hoc builds are not notarized. A browser-downloaded DMG gets a quarantine flag, so Gatekeeper asks the user to approve it once (System Settings → Privacy & Security → Open Anyway). `scripts/install.sh` downloads with curl, which sets no quarantine flag, so Gatekeeper doesn't assess the app. The script verifies `SHA256SUMS.txt` and the bundle's code signature before installing. Because an ad-hoc signature changes with every build, macOS may ask again for privacy permissions after an update. A Developer ID certificate removes both caveats; add the secrets above and CI switches to signing and notarization.
+
+**Releases.** Pushing a `v*` tag runs the full package matrix, uploads the installers, and drafts a GitHub release (`release` job in `ci.yml`). The job checks that the tag matches `package.json`, requires `docs/releases/<version>.md` as the release notes, adds `install.sh` and `SHA256SUMS.txt`, and marks versions containing `-` as prereleases. A human publishes the draft.
 
 ## Learning events (future Learning Space)
 
