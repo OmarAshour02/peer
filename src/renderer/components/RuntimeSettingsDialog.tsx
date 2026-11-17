@@ -61,7 +61,7 @@ export function RuntimeSettingsDialog() {
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-8" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-      <div role="dialog" aria-label="Runtime settings" className="w-full max-w-xl rounded-lg border border-line bg-panel shadow-xl">
+      <div role="dialog" aria-label="Runtime settings" className="w-full max-w-xl rounded-xl border border-line bg-panel shadow-composer">
         <div className="flex items-center border-b border-line px-5 py-3">
           <div className="flex-1 text-[15px] font-semibold">Runtime settings</div>
           <button onClick={close} className="text-[12px] text-faint hover:text-fg">

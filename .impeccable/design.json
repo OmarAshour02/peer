@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-03T12:30:23Z",
+  "title": "Design System: Peer",
+  "extensions": {
+    "colorMeta": {
+      "bg": { "role": "neutral", "displayName": "Void", "canonical": "#090B09", "tonalRamp": ["#090B09", "#0F120F", "#171B16", "#262C24", "#3A4438", "#5C6B58", "#8A9A85", "#C4D2C0"] },
+      "panel": { "role": "neutral", "displayName": "Panel", "canonical": "#0F120F", "tonalRamp": ["#0A0D0A", "#0F120F", "#171B16", "#22281F", "#394233", "#5C6B58", "#93A48E", "#CBD8C6"] },
+      "accent": { "role": "primary", "displayName": "Graph-Paper Green", "canonical": "#86B985", "tonalRamp": ["#1E2B1C", "#2E4529", "#42613C", "#5E8F5C", "#86B985", "#A3CCA0", "#C2DFC0", "#E4F2E2"] },
+      "accent-deep": { "role": "primary", "displayName": "Graph-Paper Green Deep", "canonical": "#5E8F5C", "tonalRamp": ["#162111", "#22331E", "#32492C", "#466840", "#5E8F5C", "#7FAE7A", "#A9CCA4", "#D8EDD4"] },
+      "link": { "role": "secondary", "displayName": "Steel Link Blue", "canonical": "#7AA2C9", "tonalRamp": ["#16202C", "#23344A", "#33506F", "#4A719B", "#7AA2C9", "#9DBEDD", "#C0D6EC", "#E6F0F9"] },
+      "paper": { "role": "neutral", "displayName": "Paper", "canonical": "#F7F5F0", "tonalRamp": ["#292929", "#4A463F", "#6E6A61", "#898681", "#B3AFA4", "#D5D1C9", "#EDEAE3", "#F7F5F0"] },
+      "graphite": { "role": "neutral", "displayName": "Graphite", "canonical": "#292929", "tonalRamp": ["#141414", "#1F1F1F", "#292929", "#3D3D3D", "#5A5A5A", "#7D7D7D", "#A8A8A8", "#D9D9D9"] },
+      "muted-olive": { "role": "primary", "displayName": "Muted Olive", "canonical": "#606E56", "tonalRamp": ["#23281F", "#39412F", "#4C5840", "#55624D", "#606E56", "#87937A", "#ACB6A1", "#DCE2D4"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Empty-state question only, one per screen at most." },
+      "headline": { "displayName": "Headline", "purpose": "Session titles, dialog titles, checkpoint questions." },
+      "body": { "displayName": "Body", "purpose": "Transcript text, answers, settings prose." },
+      "label": { "displayName": "Label", "purpose": "Card kinds, eyebrows, timestamps; metadata only." },
+      "mono": { "displayName": "Mono", "purpose": "Code, paths, token counts, constellation labels." }
+    },
+    "shadows": [
+      { "name": "ambient-card-dark", "value": "0 8px 30px rgba(0,0,0,0.35)", "purpose": "Checkpoint cards, project card, changes panel (dark)." },
+      { "name": "ambient-card-light", "value": "0 8px 30px rgba(41,41,41,0.10)", "purpose": "Checkpoint cards, project card, changes panel (light)." },
+      { "name": "ambient-composer-dark", "value": "0 12px 40px rgba(0,0,0,0.45)", "purpose": "Composer and dialogs (dark)." },
+      { "name": "ambient-composer-light", "value": "0 12px 40px rgba(41,41,41,0.12)", "purpose": "Composer and dialogs (light)." }
+    ],
+    "motion": [
+      { "name": "ease-standard", "value": "cubic-bezier(0.4, 0, 0.2, 1)", "purpose": "Default easing for state transitions, 120-200ms." },
+      { "name": "constellation-drift", "value": "transform 60s linear infinite", "purpose": "Near-imperceptible node drift; disabled under prefers-reduced-motion." }
+    ],
+    "breakpoints": [
+      { "name": "panel-overlay", "value": "900px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button (dark)",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Main action in dark mode: send, confirm, save.",
+      "html": "<button class=\"ds-btn-primary\">Send</button>",
+      "css": ".ds-btn-primary { background: #86B985; color: #090B09; font: 500 13px ui-sans-serif, system-ui, sans-serif; padding: 6px 14px; border: none; border-radius: 8px; cursor: pointer; transition: background 0.15s cubic-bezier(0.4,0,0.2,1); } .ds-btn-primary:hover { background: #5E8F5C; color: #E9EEE7; } .ds-btn-primary:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
+    },
+    {
+      "name": "Primary Button (light)",
+      "kind": "button",
+      "refersTo": "button-primary-light",
+      "description": "Main action in light mode: Muted Olive on paper.",
+      "html": "<button class=\"ds-btn-primary-light\">Send</button>",
+      "css": ".ds-btn-primary-light { background: #606E56; color: #FFFFFF; font: 500 13px ui-sans-serif, system-ui, sans-serif; padding: 6px 14px; border: none; border-radius: 8px; cursor: pointer; transition: background 0.15s cubic-bezier(0.4,0,0.2,1); } .ds-btn-primary-light:hover { background: #55624D; } .ds-btn-primary-light:focus-visible { outline: 2px solid #606E56; outline-offset: 2px; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Toggles and header actions: quiet until hovered.",
+      "html": "<button class=\"ds-btn-ghost\">Approach gate: off</button>",
+      "css": ".ds-btn-ghost { background: #171B16; color: #9DAA9C; font: 400 12px ui-sans-serif, system-ui, sans-serif; padding: 5px 12px; border: 1px solid #262C24; border-radius: 8px; cursor: pointer; transition: color 0.15s, border-color 0.15s; } .ds-btn-ghost:hover { color: #E9EEE7; } .ds-btn-ghost:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
+    },
+    {
+      "name": "Checkpoint Card",
+      "kind": "card",
+      "refersTo": "card-checkpoint",
+      "description": "Peer's signature card: a question the developer must answer before the agent proceeds.",
+      "html": "<div class=\"ds-card-checkpoint\"><div class=\"ds-card-kind\">Peer paused the agent · large change</div><div class=\"ds-card-q\">This task's changes have grown to 6 files. Continue?</div><button class=\"ds-card-opt\">Continue with the changes</button><button class=\"ds-card-opt\">Stop here</button></div>",
+      "css": ".ds-card-checkpoint { background: #0F120F; color: #E9EEE7; font: 400 14px/1.6 ui-sans-serif, system-ui, sans-serif; border: 1px solid #86B985; border-radius: 12px; padding: 12px 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.35); display: flex; flex-direction: column; gap: 8px; } .ds-card-kind { font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: #86B985; } .ds-card-q { font-size: 15px; font-weight: 600; } .ds-card-opt { background: #171B16; color: #E9EEE7; font: 400 13px ui-sans-serif, system-ui, sans-serif; text-align: left; padding: 8px 12px; border: 1px solid #262C24; border-radius: 8px; cursor: pointer; } .ds-card-opt:hover { border-color: #86B985; } .ds-card-opt:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
+    },
+    {
+      "name": "Composer",
+      "kind": "input",
+      "refersTo": "input-composer",
+      "description": "The floating message composer at the foot of the transcript.",
+      "html": "<div class=\"ds-composer\"><div class=\"ds-composer-text\">Ask for changes, or discuss first…</div><div class=\"ds-composer-row\"><span class=\"ds-chip\">Collaborate</span><button class=\"ds-send\" aria-label=\"Send\">↑</button></div></div>",
+      "css": ".ds-composer { background: #0F120F; border: 1px solid #262C24; border-radius: 16px; padding: 12px 16px; box-shadow: 0 12px 40px rgba(0,0,0,0.45); font: 400 14px ui-sans-serif, system-ui, sans-serif; } .ds-composer-text { color: #7D8B7A; min-height: 40px; } .ds-composer-row { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; } .ds-chip { background: #171B16; color: #58A6FF; font-size: 11px; font-weight: 500; padding: 2px 8px; border: 1px solid #262C24; border-radius: 4px; } .ds-send { background: #86B985; color: #090B09; width: 32px; height: 32px; border: none; border-radius: 999px; font-size: 15px; cursor: pointer; } .ds-send:hover { background: #5E8F5C; color: #E9EEE7; } .ds-send:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
+    },
+    {
+      "name": "Session Row",
+      "kind": "nav",
+      "description": "One session in the sidebar: title and age, active state by tone.",
+      "html": "<div class=\"ds-session-row\"><span class=\"ds-session-title\">Fix the flaky test</span><span class=\"ds-session-age\">2h</span></div>",
+      "css": ".ds-session-row { display: flex; justify-content: space-between; gap: 8px; background: #171B16; color: #E9EEE7; font: 400 13px ui-sans-serif, system-ui, sans-serif; padding: 6px 10px; border-radius: 8px; cursor: pointer; } .ds-session-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-session-age { color: #7D8B7A; font: 400 11px ui-monospace, Menlo, monospace; } .ds-session-row:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
+    },
+    {
+      "name": "Text Field (light)",
+      "kind": "input",
+      "description": "Settings field on paper: pencil border, olive focus.",
+      "html": "<input class=\"ds-field-light\" value=\"/usr/local/bin/claude\" />",
+      "css": ".ds-field-light { background: #FFFFFF; color: #292929; font: 400 13px ui-sans-serif, system-ui, sans-serif; padding: 6px 10px; border: 1px solid #D5D1C9; border-radius: 8px; width: 260px; } .ds-field-light:focus-visible { outline: 2px solid #606E56; outline-offset: 1px; border-color: #606E56; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Constellation Graph",
+    "overview": "Peer looks like knowledge plotted in the dark. The working surface is a near-black, green-tinted void — calm as T3 Code's console — and behind the quiet moments (a new thread, an empty state, the Learning Space) a faint constellation of nodes and connecting lines drifts: graph theory, geometry, and proof sketches rendered as small scientific figures, never as decoration for its own sake. Knowledge in Peer is a network of concepts the developer has actually touched, and the interface says so visually.\n\nDark mode is home. It carries the signature: deep green-black surfaces, graph-paper green emphasis, soft ambient lift under the things that float. Light mode is a full peer, not an inversion: the developer's paper palette — Paper ground, Graphite text, Pencil Lines for structure, Muted Olive for emphasis — like working notes on good stock. Both themes share one geometry, one type system, and one behavior for every control.",
+    "keyCharacteristics": [
+      "Near-black green-tinted dark theme; warm paper light theme. Never a blue-gray theme again.",
+      "Graph-paper green leads in the dark; Muted Olive leads in the light. Blue survives only as links and the Collaborate mode color.",
+      "A constellation layer — node-and-line science figures at low opacity — appears only where the developer is orienting, never behind working text.",
+      "Soft ambient shadows do the lifting; 1px lines do the separating.",
+      "Small, precise, restrained controls (11–14px type) that stay invisible until needed.",
+      "Every control is fully keyboard-operable, with a visible focus ring in both themes."
+    ],
+    "rules": [
+      { "name": "The Constellation Rule", "body": "The node-network layer appears only on orientation surfaces — new-thread and empty states, the Learning Space, onboarding. It never sits behind a transcript, a diff, or settings: where the developer is working, the ground is still.", "section": "colors" },
+      { "name": "The Green Leads Rule", "body": "In the dark, graph-paper green is the only general accent. If a screen's loudest element is blue and it is not a link or a Collaborate marker, it is wrong.", "section": "colors" },
+      { "name": "The Paper Rule", "body": "In the light, Paper is the ground and Warm White is earned by elevation. A white sidebar on Paper, or Paper-colored cards, flatten the system — don't.", "section": "colors" },
+      { "name": "The Small Type Rule", "body": "Product UI text lives at 11–14px. Anything larger than Headline outside the empty state is a bug, not emphasis.", "section": "typography" },
+      { "name": "The Float Responsibly Rule", "body": "Shadows answer \"this floats above the work\" — composer, cards, dialogs, menus. Rows, code blocks, and inline surfaces never cast one.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep working surfaces still: the constellation belongs to new-thread, empty, and Learning surfaces only (The Constellation Rule).",
+      "Do spend Graph-Paper Green (dark) and Muted Olive (light) on actions, emphasis borders, and focus — and almost nothing else (The Green Leads Rule).",
+      "Do use mode colors only for collaboration meaning: mode labels, checkpoint kinds, risk and safety states.",
+      "Do lift only what floats — composer, cards, dialogs — with the ambient shadows, and separate everything else with the 1px line.",
+      "Do give every interactive element the 2px accent :focus-visible outline in both themes; keyboard-first is binding.",
+      "Do label constellation clusters only from the developer's real sessions and code. Unlabeled geometry is the honest default."
+    ],
+    "donts": [
+      "Don't reintroduce the incumbent blue-gray GitHub-dark palette (#58A6FF as general accent, #0D1117 grounds). Blue is links and Collaborate coding now.",
+      "Don't put constellation figures, gradients, or glow behind a transcript, diff, code block, or settings form.",
+      "Don't use Soft Gray (#63665E) for body text on Paper, or Faint (#7D8B7A) for body text in the dark; both are metadata-only steps.",
+      "Don't fill chips or rows with mode colors; mode color is text and hairline, never a background wash.",
+      "Don't add a second accent, a gradient button, or an emoji anywhere in product UI.",
+      "Don't invent constellation labels, concept names, or learning data for decoration. If it isn't from the developer's real work, it isn't drawn."
+    ]
+  }
+}

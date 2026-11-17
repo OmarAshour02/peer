@@ -1,3 +1,7 @@
+import type { Nodes as MdastNode } from "mdast";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { gfmFromMarkdown } from "mdast-util-gfm";
+import { gfm } from "micromark-extension-gfm";
 import type {
   CollaborationModeId,
   ModelRef,
@@ -26,6 +30,8 @@ const DEFAULT_TITLE = "New session";
  */
 export class PeerService {
   readonly engine: CollaborationEngine;
+  /** Workspaces being removed: no new sessions or turns start in them while cleanup runs. */
+  private readonly removingWorkspaces = new Set<string>();
   /** Pending permission requests by id, mapped to the Peer session they belong to. */
   private readonly permissions = new Map<string, PermissionRequest>();
   private readonly lastErrors = new Map<string, string>();
@@ -80,9 +86,14 @@ export class PeerService {
   ): Promise<PeerSession> {
     const ws = this.store.getWorkspace(workspaceId);
     if (!ws) throw new EngineError("Unknown workspace", 404);
+    if (this.removingWorkspaces.has(workspaceId)) throw new EngineError("This project is being removed", 409);
     const initialPrefs = this.preferences();
     const runtime = this.requireRuntime(input.runtime ?? initialPrefs.defaultRuntime);
     const runtimeSession = await runtime.createSession(ws.path, {});
+    // Removal may have started (or finished) while the runtime created this session;
+    // never register it against a project that is going or gone.
+    if (this.removingWorkspaces.has(workspaceId)) throw new EngineError("This project is being removed", 409);
+    if (!this.store.getWorkspace(workspaceId)) throw new EngineError("Unknown workspace", 404);
     // Memory preferences are re-read after the await: a reset (or switching memory off) that
     // landed while the runtime created the session must not be resurrected by this creation.
     const prefs = this.preferences();
@@ -119,7 +130,7 @@ export class PeerService {
 
   updateSession(
     sessionId: string,
-    patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string; autoApprovals?: boolean; approachGate?: boolean; discussing?: boolean },
+    patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string; autoApprovals?: boolean; approachGate?: boolean; yolo?: boolean; discussing?: boolean },
   ): PeerSession {
     let session = this.requireSession(sessionId);
     if (patch.mode) session = this.engine.setMode(sessionId, patch.mode);
@@ -142,8 +153,29 @@ export class PeerService {
       session = this.store.updateSession(sessionId, { approachGate: patch.approachGate });
       this.store.logEvent(sessionId, "approach_gate.changed", { on: patch.approachGate });
     }
-    if (patch.model !== undefined || patch.title !== undefined || patch.autoApprovals !== undefined || patch.approachGate !== undefined) this.hub.emit({ type: "session.updated", session });
+    if (patch.yolo !== undefined && patch.yolo !== session.yolo) {
+      session = this.store.updateSession(sessionId, { yolo: patch.yolo });
+      this.store.logEvent(sessionId, "yolo.changed", { on: patch.yolo });
+      // Requests already waiting on the developer are settled the same way as new ones.
+      if (patch.yolo) for (const p of [...this.permissions.values()]) if (p.sessionId === sessionId) void this.yoloApprove(session, p);
+    }
+    if (patch.model !== undefined || patch.title !== undefined || patch.autoApprovals !== undefined || patch.approachGate !== undefined || patch.yolo !== undefined)
+      this.hub.emit({ type: "session.updated", session });
     return session;
+  }
+
+  /** Stop every session's run before forgetting the workspace, so nothing keeps working unsupervised. */
+  async removeWorkspace(id: string) {
+    const ws = this.store.getWorkspace(id);
+    if (!ws) throw new EngineError("Unknown workspace", 404);
+    if (ws.general) throw new EngineError("Chats is part of Peer and cannot be removed; delete individual chats instead.", 400);
+    this.removingWorkspaces.add(id);
+    try {
+      for (const s of this.store.listSessions(id)) await this.deleteSession(s.id);
+      this.store.removeWorkspace(id);
+    } finally {
+      this.removingWorkspaces.delete(id);
+    }
   }
 
   /** Stop any run before forgetting the session, so nothing keeps working unsupervised. */
@@ -184,6 +216,8 @@ export class PeerService {
   }
 
   async send(sessionId: string, text: string, intent?: Parameters<CollaborationEngine["sendMessage"]>[2]) {
+    const session = this.requireSession(sessionId);
+    if (this.removingWorkspaces.has(session.workspaceId)) throw new EngineError("This project is being removed", 409);
     this.lastErrors.delete(sessionId);
     return this.engine.sendMessage(sessionId, text, intent);
   }
@@ -210,6 +244,24 @@ export class PeerService {
     this.permissions.delete(requestId);
     this.store.logEvent(session.id, "permission.replied", { permission: request.permission, patterns: request.patterns, reply });
     this.hub.emit({ type: "permission.replied", sessionId: session.id, requestId });
+  }
+
+  /**
+   * YOLO: approve a permission request without asking. "once", so turning YOLO off later
+   * restores the prompts; nothing is saved as an "always" grant on the developer's behalf.
+   * If the runtime refuses the reply (the run ended meanwhile), the card stays for the developer.
+   */
+  private async yoloApprove(session: PeerSession, request: PermissionRequest) {
+    try {
+      await this.runtimeOf(session).replyPermission(this.engine.directoryOf(session), request.id, "once");
+    } catch (err) {
+      this.store.logEvent(session.id, "permission.yolo_failed", { permission: request.permission, error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    this.store.logEvent(session.id, "permission.replied", { permission: request.permission, patterns: request.patterns, reply: "once", by: "yolo" });
+    // Claude Code and Codex report the reply themselves (permission.replied, handled above), which
+    // already cleared the request; only announce it when nothing else has.
+    if (this.permissions.delete(request.id)) this.hub.emit({ type: "permission.replied", sessionId: session.id, requestId: request.id });
   }
 
   private requireSession(id: string): PeerSession {
@@ -243,6 +295,12 @@ export class PeerService {
         const request = { ...event.request, sessionId: session.id };
         this.permissions.set(request.id, request);
         this.store.logEvent(session.id, "permission.asked", { permission: request.permission, patterns: request.patterns });
+        if (session.yolo) {
+          await this.yoloApprove(session, request);
+          // A failed auto-approval falls back to asking the developer.
+          if (this.permissions.has(request.id)) this.hub.emit({ type: "permission.asked", request });
+          return;
+        }
         this.hub.emit({ type: "permission.asked", request });
         return;
       }
@@ -261,8 +319,9 @@ export class PeerService {
     switch (event.type) {
       case "session.updated":
         // OpenCode titles new sessions "New session - <date>" until it generates a real title.
-        if (event.title && event.title !== session.title && !event.title.startsWith(DEFAULT_TITLE) && !this.store.titledByDeveloper(session.id)) {
-          this.hub.emit({ type: "session.updated", session: this.store.updateSession(session.id, { title: event.title }) });
+        if (event.title && !event.title.startsWith(DEFAULT_TITLE) && !this.store.titledByDeveloper(session.id)) {
+          const title = plainTitle(event.title);
+          if (title && title !== session.title) this.hub.emit({ type: "session.updated", session: this.store.updateSession(session.id, { title }) });
         }
         return;
       case "session.status":
@@ -294,4 +353,23 @@ export class PeerService {
         return;
     }
   }
+}
+
+/**
+ * A runtime's title as plain text. Claude Code titles a session with the developer's first message,
+ * Markdown and all; the sidebar and header show text. Parsed as Markdown (GFM), so syntax goes and
+ * content stays: code spans keep their text (`__init__`), literal `2 ** 3` stays, links keep their
+ * label, and fenced code blocks and raw HTML are dropped.
+ */
+export function plainTitle(title: string): string {
+  const tree = fromMarkdown(title, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] });
+  const text = (node: MdastNode): string => {
+    if (node.type === "code" || node.type === "html") return " ";
+    if ("value" in node && typeof node.value === "string") return node.value;
+    if (!("children" in node)) return node.type === "break" ? " " : "";
+    // Block-level children are separate runs of text: keep a space between them.
+    const inline = node.type === "paragraph" || node.type === "heading" || node.type === "emphasis" || node.type === "strong" || node.type === "delete" || node.type === "link" || node.type === "linkReference" || node.type === "tableCell";
+    return (node.children as MdastNode[]).map(text).join(inline ? "" : " ");
+  };
+  return text(tree).replace(/\s+/g, " ").trim();
 }

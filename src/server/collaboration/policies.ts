@@ -42,6 +42,17 @@ export const SHARED_PRINCIPLES: readonly string[] = [
   "Keep your actions visible: say briefly what you are about to change and why.",
 ];
 
+/**
+ * How Learn talks: a live tutoring session, not an article per reply. The agent sizes each reply to
+ * what it carries, and draws when a picture teaches faster than prose.
+ */
+export const LEARN_CONVERSATION: readonly string[] = [
+  "Teach in a conversation, not in articles. Most replies are short: two to five sentences that make one point, then hand the turn back (your question, a hint, or what you will do next). Build understanding over several exchanges instead of covering everything at once; the developer can always ask for more.",
+  "Size each reply to what it carries; you decide. Keep it short for a question, feedback on their reasoning, a hint, a correction, a progress update, and for each step of a concept you are teaching. Go longer only when the developer asks for it (a direct answer, \"explain it fully\", \"go deeper\"), for reference material they asked for (a comparison, a summary of what was covered), or for a walkthrough of a non-obvious bug in their code. Even then, open with the point in one sentence, structure the rest, and stop when it is covered. No preamble, no recap of what they said, no closing summary of a short reply.",
+  "Graduate the difficulty. A concept with several parts (\"how does it work internally\") is taught in steps across replies, not in one reply: give one piece, then check it landed with a quick question that uses only what you just taught, before adding the next. Climb gradually: recall, then apply, then predict, then design. Ask them to predict something new only once the pieces it builds on are in place, and never introduce a topic and quiz them on the next one in the same reply. Follow their answers: a confident, correct answer moves faster; a shaky one gets the same idea from another angle before you go on.",
+  "Draw when a picture explains faster than prose. Use a ```mermaid diagram (flowchart, sequenceDiagram, stateDiagram-v2, classDiagram, erDiagram) for a data or control flow, a call sequence, a state machine, a structure, or a before/after; keep it small (about a dozen nodes or fewer) and label it with names from this codebase. Use LaTeX for math: $inline$ and $$display$$ (complexity, probabilities, formulas, a numeric argument). A diagram replaces paragraphs rather than repeating them; never draw for decoration.",
+];
+
 export const POLICIES: Record<CollaborationModeId, CollaborationPolicy> = {
   // Retired in v0.2: not offered in the UI; kept so existing sessions and the API keep working.
   focus: {
@@ -99,6 +110,7 @@ export const POLICIES: Record<CollaborationModeId, CollaborationPolicy> = {
       "Do not become a quiz: no trivia, no questions about what the developer clearly knows, no question when the work is routine. One good question per meaningful decision is usually enough.",
       "Do boilerplate, mechanical edits and routine follow-ups normally, without turning them into lessons.",
       "If the developer wants to move on, move on. After implementing, briefly connect the change to the reasoning they did.",
+      ...LEARN_CONVERSATION,
     ],
   },
 };
@@ -118,7 +130,12 @@ export interface PolicyContext {
   handsOff?: boolean;
   /** "Discuss first" was already in effect before this message: a follow-up in the discussion. */
   continuingDiscussion?: boolean;
+  /** A general chat (not a project): teaching questions are asked in the reply, not as checkpoints. */
+  generalChat?: boolean;
 }
+
+/** Checkpoint categories a general chat asks inline instead (they would be blocking quiz cards). */
+export const CHAT_INLINE_CATEGORIES: readonly CheckpointCategory[] = ["hypothesis", "concept"];
 
 /** The effective rules for one turn: the mode policy adjusted by the developer's explicit intent. */
 export interface EffectivePolicy {
@@ -161,6 +178,16 @@ export function resolveEffectivePolicy(
   previousTurnAwaitingEngagement: boolean,
   context: PolicyContext = {},
 ): EffectivePolicy {
+  const plan = resolveForIntent(mode, intent, previousTurnAwaitingEngagement, context);
+  return context.generalChat ? { ...plan, askFor: plan.askFor.filter((c) => !CHAT_INLINE_CATEGORIES.includes(c)) } : plan;
+}
+
+function resolveForIntent(
+  mode: CollaborationModeId,
+  intent: TurnIntent,
+  previousTurnAwaitingEngagement: boolean,
+  context: PolicyContext,
+): EffectivePolicy {
   const policy = getPolicy(mode);
   const base = { policy, intent, adaptation: null };
 
@@ -197,7 +224,7 @@ export function resolveEffectivePolicy(
         checkpointBudget: policy.checkpointBudget,
         gate: "hold",
         decisions: policy.detectedDecisions,
-        intentGuidance: `The developer asked for a hint. Give the next useful hint: one concise step (where to look, what to compare, what to try) grounded in this codebase, without revealing the full solution.${further}${nearly} Do not modify files in this turn.`,
+        intentGuidance: `The developer asked for a hint. Give the next useful hint in a few sentences at most (a small diagram is fine when it is the hint): one concise step (where to look, what to compare, what to try) grounded in this codebase, without revealing the full solution.${further}${nearly} Do not modify files in this turn.`,
       };
     }
     case "answer":
@@ -209,7 +236,7 @@ export function resolveEffectivePolicy(
         // A direct answer, not a Socratic question.
         decisions: { ask: policy.detectedDecisions.ask, style: "choice" },
         intentGuidance:
-          "The developer asked for a direct answer. Answer the current question directly and completely, with the reasoning, without Socratic questions or asking for their hypothesis. Then continue with the task if it calls for code changes.",
+          "The developer asked for a direct answer. Answer the current question directly and completely, with the reasoning, without Socratic questions or asking for their hypothesis. This is one of the replies that may run long: lead with the answer, and use a diagram or a formula where it makes it clearer. Then continue with the task if it calls for code changes.",
       };
     case "proceed":
     case "default": {

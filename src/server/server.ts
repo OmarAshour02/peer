@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { serve, type ServerType } from "@hono/node-server";
@@ -67,6 +67,10 @@ export async function startPeerServer(opts: PeerServerOptions): Promise<PeerServ
   const log = opts.log ?? ((line: string) => console.log(line));
   mkdirSync(opts.dataDir, { recursive: true });
   const store = new Store(join(opts.dataDir, "peer.db"));
+  // General chats run in a folder Peer owns, so the agent has a working directory outside any project.
+  const chatsDir = join(opts.dataDir, "chats");
+  mkdirSync(chatsDir, { recursive: true });
+  store.ensureGeneralWorkspace(realpathSync(chatsDir));
   const hub = new EventHub();
   const apiToken = loadOrCreateToken(opts.dataDir, opts.persistToken ?? false);
   const bridgeToken = randomBytes(32).toString("base64url");

@@ -68,6 +68,8 @@ describe("store", () => {
       ALTER TABLE sessions DROP COLUMN discussing;
       ALTER TABLE turns DROP COLUMN relocked_at;
       ALTER TABLE sessions DROP COLUMN approach_gate;
+      ALTER TABLE sessions DROP COLUMN yolo;
+      ALTER TABLE workspaces DROP COLUMN general;
       PRAGMA user_version = 2;
     `);
     a.db.prepare("INSERT INTO turns (id, session_id, mode, intent, gate, started_at) VALUES ('turn_old', ?, 'learn', 'default', 'open', 1)").run(s.id);
@@ -81,9 +83,11 @@ describe("store", () => {
     expect(b.getTurn("turn_old")!.undoneAt).toBeNull();
     expect(b.turnTrees("turn_old")).toEqual({ start: null, end: null });
     expect(b.getWorkspace(ws.id)!.sandboxNetwork).toBe(false);
+    expect(b.getWorkspace(ws.id)!.general).toBe(false);
     expect(b.titledByDeveloper(s.id)).toBe(false);
     expect(b.getSession(s.id)!.autoApprovals).toBe(false);
     expect(b.getSession(s.id)!.approachGate).toBe(false);
+    expect(b.getSession(s.id)!.yolo).toBe(false);
     expect(b.getSession(s.id)!.discussing).toBe(false);
     expect(b.getTurn("turn_old")!.relockedAt).toBeNull();
     // Checkpoints from before Peer opened its own are the agent's.

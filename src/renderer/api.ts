@@ -28,6 +28,7 @@ declare global {
       getConfig(): Promise<{ apiBase: string; token: string }>;
       pickDirectory(): Promise<string | null>;
       platform: string;
+      setTheme?(theme: "light" | "dark"): void;
     };
   }
 }
@@ -112,10 +113,12 @@ export class PeerApi {
     this.request<PeerSession>("POST", `/workspaces/${workspaceId}/sessions`, input);
   models = (workspaceId: string, runtime: RuntimeKind) =>
     this.request<ModelsResponse>("GET", `/workspaces/${workspaceId}/models?runtime=${encodeURIComponent(runtime)}`);
+  /** Sessions across every project and Chats whose title matches; recent ones for an empty query. */
+  searchSessions = (query: string) => this.request<PeerSession[]>("GET", `/sessions?q=${encodeURIComponent(query)}`);
   snapshot = (sessionId: string) => this.request<SessionSnapshot>("GET", `/sessions/${sessionId}`);
   messages = (sessionId: string) => this.request<PeerMessage[]>("GET", `/sessions/${sessionId}/messages`);
   diff = (sessionId: string) => this.request<FileDiff[]>("GET", `/sessions/${sessionId}/diff`);
-  updateSession = (sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string; autoApprovals?: boolean; approachGate?: boolean; discussing?: boolean }) =>
+  updateSession = (sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string; autoApprovals?: boolean; approachGate?: boolean; yolo?: boolean; discussing?: boolean }) =>
     this.request<PeerSession>("PATCH", `/sessions/${sessionId}`, patch);
   undoTurn = (sessionId: string) => this.request<UndoResult>("POST", `/sessions/${sessionId}/undo`);
   deleteSession = (sessionId: string) => this.request("DELETE", `/sessions/${sessionId}`);

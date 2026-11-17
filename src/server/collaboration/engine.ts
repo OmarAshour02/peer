@@ -26,7 +26,7 @@ import type { RuntimeSet } from "../runtime/set.js";
 import type { Store } from "../store.js";
 import { detectContractChange, detectDecision, editTargetPaths, namesApproved, type Detection } from "./decisions.js";
 import { isGoAhead, parseIntent } from "./intent.js";
-import { INTENT_LABELS, getPolicy, resolveEffectivePolicy, type PolicyContext } from "./policies.js";
+import { CHAT_INLINE_CATEGORIES, INTENT_LABELS, getPolicy, resolveEffectivePolicy, type PolicyContext } from "./policies.js";
 import { composeSystemPrompt } from "./prompt.js";
 import { isReadOnlyTool } from "./tool-classification.js";
 
@@ -334,7 +334,12 @@ export class CollaborationEngine {
     // continuation carries on work the developer already engaged with. A resumed Learn task whose
     // only engagement was a go-ahead on a confirm checkpoint overrides this: it resumes locked.
     const awaitingEngagement = awaitingEngagementOverride ?? (isResume || isContinuation || (previous !== null && isLocked(previous)));
-    const context: PolicyContext = { ...extra, hintLevel: intent === "hint" ? this.hintsInARow(session.id) + 1 : undefined, handsOff: this.handsOff(session.id) };
+    const context: PolicyContext = {
+      ...extra,
+      hintLevel: intent === "hint" ? this.hintsInARow(session.id) + 1 : undefined,
+      handsOff: this.handsOff(session.id),
+      generalChat: this.isGeneralChat(session),
+    };
     let plan = resolveEffectivePolicy(session.mode, intent, awaitingEngagement, context);
     // Same task, same budget: the continuation is told what is left of it.
     if (continuedFrom) plan = { ...plan, checkpointBudget: Math.max(0, plan.checkpointBudget - this.checkpointsUsed(continuedFrom)) };
@@ -371,6 +376,7 @@ export class CollaborationEngine {
         decided: this.decidedSoFar(session.id),
         previousTurnLocked: previous !== null && (previous.gate !== "open" || previous.relockedAt !== null),
         approachGateThreshold: session.approachGate && session.mode === "collaborate" ? APPROACH_GATE_FILE_THRESHOLD : undefined,
+        generalChat: this.isGeneralChat(session),
       });
       await runtime.prompt(directory, session.runtimeSessionId, {
         text,
@@ -471,12 +477,16 @@ export class CollaborationEngine {
       return {
         allow: false,
         explain: true,
-        reason: `Peer collaboration gate: "${tool}" was not run. The developer said this task is not routine work: ask them your question with ${this.checkpointToolFor(session)} before changing code. Reading and exploring the code is still allowed.`,
+        reason: this.isGeneralChat(session)
+          ? `Peer collaboration gate: "${tool}" was not run. The developer said this task is not routine work: ask them your question in your reply as plain text and end your turn; their reply unlocks code changes.`
+          : `Peer collaboration gate: "${tool}" was not run. The developer said this task is not routine work: ask them your question with ${this.checkpointToolFor(session)} before changing code. Reading and exploring the code is still allowed.`,
       };
     }
     const how = this.liveCheckpoint(session.id)
       ? "Wait for the developer's response to your open checkpoint."
-      : lockKind(this.store.latestTurn(session.id)!) === "engage"
+      : lockKind(this.store.latestTurn(session.id)!) === "engage" && this.isGeneralChat(session)
+        ? "Engage the developer first: ask your question in your reply as plain text and end your turn; their reply unlocks code changes."
+        : lockKind(this.store.latestTurn(session.id)!) === "engage"
         ? `Engage the developer first: ask your question with the ${this.checkpointToolFor(session)} tool (or finish your turn with it). If the work is routine and needs nothing from them, say so with ${this.checkpointToolFor(session)} category "routine" instead of asking.`
         : `The developer wants no code changes until they choose to proceed; continue the discussion, or finish your turn.`;
     return {
@@ -746,6 +756,11 @@ export class CollaborationEngine {
    * then blocks in waitForCheckpoint) or declines it according to policy and returns the
    * instruction to give the agent immediately.
    */
+  /** The session is a general chat (Peer's Chats workspace), not a project. */
+  private isGeneralChat(session: PeerSession): boolean {
+    return this.store.getWorkspace(session.workspaceId)?.general === true;
+  }
+
   async requestCheckpoint(
     runtimeSessionId: string,
     callId: string | null,
@@ -760,7 +775,8 @@ export class CollaborationEngine {
     const mode = turn?.mode ?? session.mode;
     const intent = turn?.intent ?? "default";
     const handsOff = this.handsOff(session.id);
-    const plan = resolveEffectivePolicy(mode, intent, false, { handsOff });
+    const generalChat = this.isGeneralChat(session);
+    const plan = resolveEffectivePolicy(mode, intent, false, { handsOff, generalChat });
     const record = (resolution: Checkpoint["resolution"]) =>
       this.store.createCheckpoint({
         ...input,
@@ -795,6 +811,8 @@ export class CollaborationEngine {
     let declined: string | null = null;
     if (earlier) {
       declined = "the developer already answered this question in this task";
+    } else if (generalChat && CHAT_INLINE_CATEGORIES.includes(input.category)) {
+      declined = "in a chat, ask teaching questions in your reply as plain text and end your turn; the developer answers there";
     } else if (!plan.askFor.includes(input.category)) {
       const qualifier = intent === "default" ? "" : ` with "${INTENT_LABELS[intent]}"`;
       declined =
@@ -1027,7 +1045,9 @@ export class CollaborationEngine {
     // A go-ahead on a plan in Learn approves the plan but is not the engagement that unlocks.
     const confirmHeld =
       !cp.decision && cp.category === "confirm" && turn?.mode === "learn" && turn !== null && isLocked(turn) && (r?.action === "answer" || r?.action === "choose")
-        ? ` Code changes stay locked: in Learn mode a go-ahead on a plan does not count as engaging with the task. Ask the developer a hypothesis or concept question about the key part of this task with ${session ? this.checkpointToolFor(session) : "the checkpoint tool"} before changing code.`
+        ? session && this.isGeneralChat(session)
+          ? " Code changes stay locked: in Learn mode a go-ahead on a plan does not count as engaging with the task. In this chat, ask the developer about the key part in your reply as plain text and end your turn; their reply unlocks code changes."
+          : ` Code changes stay locked: in Learn mode a go-ahead on a plan does not count as engaging with the task. Ask the developer a hypothesis or concept question about the key part of this task with ${session ? this.checkpointToolFor(session) : "the checkpoint tool"} before changing code.`
         : "";
     if (!r) return "The checkpoint has no response yet.";
     if (cp.decision) {
@@ -1039,7 +1059,10 @@ export class CollaborationEngine {
     switch (r.action) {
       case "policy": {
         if (cp.category === "routine") {
-          if (r.note?.includes("refused")) return `Peer did not accept this: the developer said this task is not routine. Ask them your question with ${session ? this.checkpointToolFor(session) : "the checkpoint tool"} before changing code.`;
+          if (r.note?.includes("refused"))
+            return session && this.isGeneralChat(session)
+              ? "Peer did not accept this: the developer said this task is not routine. Ask them your question in your reply as plain text and end your turn; their reply unlocks code changes."
+              : `Peer did not accept this: the developer said this task is not routine. Ask them your question with ${session ? this.checkpointToolFor(session) : "the checkpoint tool"} before changing code.`;
           if (unlocked) return `Peer recorded this as routine work without asking the developer.${unlocked}`;
           return turn && isLocked(turn)
             ? "Peer recorded this, but code changes stay locked this turn: the developer asked for a hint or to discuss first, which routine work does not override. Do not attempt edits."
@@ -1075,7 +1098,10 @@ export class CollaborationEngine {
       case "hint": {
         const n = this.hintNumber(cp);
         const tool = session ? this.checkpointToolFor(session) : "the checkpoint tool";
-        return `The developer asked for a hint (hint ${n}${r.text ? `; they added: "${r.text}"` : ""}). Reply with one short hint that moves them one step closer without revealing the full answer, then ask again with ${tool} (category "hypothesis" or "concept").`;
+        const asked = `The developer asked for a hint (hint ${n}${r.text ? `; they added: "${r.text}"` : ""}). Reply with one short hint that moves them one step closer without revealing the full answer`;
+        return session && this.isGeneralChat(session)
+          ? `${asked}, then ask your question again in your reply as plain text and end your turn; they answer in the chat.`
+          : `${asked}, then ask again with ${tool} (category "hypothesis" or "concept").`;
       }
       case "cancelled":
         return `The checkpoint was cancelled: ${r.note}.`;

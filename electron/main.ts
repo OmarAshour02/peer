@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } from "electron";
 import { startPeerServer, type PeerServer } from "../src/server/server.js";
 import { runSmokeTest } from "./smoke.js";
 
@@ -25,7 +25,7 @@ function createWindow(): BrowserWindow {
     minWidth: 900,
     minHeight: 600,
     title: "Peer",
-    backgroundColor: "#0d1117",
+    backgroundColor: "#090b09",
     show: !smokeTest,
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
@@ -78,6 +78,12 @@ app.whenReady().then(async () => {
   }
 
   ipcMain.handle("peer:config", () => ({ apiBase: peer!.url, token: peer!.token }));
+  // The title bar is native chrome: without this, a light Peer on a dark system keeps a dark bar.
+  ipcMain.on("peer:theme", (event, theme: unknown) => {
+    if (theme !== "light" && theme !== "dark") return;
+    nativeTheme.themeSource = theme;
+    BrowserWindow.fromWebContents(event.sender)?.setBackgroundColor(theme === "light" ? "#f7f5f0" : "#090b09");
+  });
   ipcMain.handle("peer:pick-directory", async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
     const result = win
