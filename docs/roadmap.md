@@ -66,7 +66,9 @@ The Learning Space should reinforce the collaboration model and be grounded in t
 
 **Capture (already in place):** `collaboration_events` records which concepts came up (checkpoint questions and categories), what the developer answered, whether they asked for hints, delegated, or skipped, plus the transcript itself in the runtime.
 
-**Proposed pipeline (not built):**
+**Built: the learning map.** The agent tags each turn's concepts (a hidden note and topics on its questions); Peer records them with encountered / engaged / demonstrated levels capped by what it saw, and the learning map (sidebar icon next to search, ⌘G) draws them as a constellation linking to the chats behind each topic (see architecture.md). It replaces steps 1-3 below with in-turn tagging, so no background model call is made.
+
+**Proposed pipeline (rest not built):**
 1. After a session goes idle, a background extraction job reads new events and transcript excerpts.
 2. It extracts *concept mentions* (e.g. "sliding window rate limiting", "socket remote address vs X-Forwarded-For") with a link back to the session, turn, and code location.
 3. Each concept is tracked as **encountered** (it came up), **engaged** (the developer answered a hypothesis/concept checkpoint), or **demonstrated** (answered correctly without hints, or later applied unaided).

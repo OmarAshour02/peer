@@ -329,3 +329,14 @@ select:focus-visible {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* Learning map: a star shows a focus ring only for keyboard focus (the ring is drawn in the SVG). */
+.map-star:focus-visible {
+  outline: none;
+}
+.map-star-ring {
+  opacity: 0;
+}
+.map-star:focus-visible .map-star-ring {
+  opacity: 1;
+}

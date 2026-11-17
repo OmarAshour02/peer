@@ -23,6 +23,7 @@ import {
 } from "../shared/types.js";
 import { EngineError } from "./collaboration/engine.js";
 import { POLICIES } from "./collaboration/policies.js";
+import { buildLearningMap } from "./collaboration/topics.js";
 import type { EventHub } from "./hub.js";
 import { ProviderError, type ProviderConnections } from "./runtime/adapter.js";
 import type { PeerService } from "./service.js";
@@ -205,11 +206,12 @@ export function createApp(deps: AppDeps): Hono {
   api.get("/policies", (c) => c.json(POLICIES));
   api.get("/preferences", (c) => c.json(service.preferences()));
   api.patch("/preferences", async (c) => {
-    const body = await c.req.json<{ defaultMode?: unknown; defaultRuntime?: unknown; lastSessionId?: unknown; runtimeSettings?: unknown; crossSessionMemory?: unknown; resetMemory?: unknown; theme?: unknown }>();
+    const body = await c.req.json<{ defaultMode?: unknown; defaultRuntime?: unknown; lastSessionId?: unknown; runtimeSettings?: unknown; crossSessionMemory?: unknown; resetMemory?: unknown; theme?: unknown; learningMap?: unknown }>();
     if (body.defaultMode !== undefined && !isMode(body.defaultMode)) return c.json({ error: "Unknown mode" }, 400);
     if (body.defaultMode !== undefined && !isPrimaryMode(body.defaultMode)) return c.json({ error: "Focus is retired as a default; use collaborate or learn." }, 400);
     if (body.crossSessionMemory !== undefined && typeof body.crossSessionMemory !== "boolean") return c.json({ error: "crossSessionMemory must be true or false" }, 400);
     if (body.theme !== undefined && body.theme !== "dark" && body.theme !== "light") return c.json({ error: "theme must be dark or light" }, 400);
+    if (body.learningMap !== undefined && typeof body.learningMap !== "boolean") return c.json({ error: "learningMap must be true or false" }, 400);
     if (body.resetMemory !== undefined && typeof body.resetMemory !== "boolean") return c.json({ error: "resetMemory must be true or false" }, 400);
     if (body.defaultRuntime !== undefined && (typeof body.defaultRuntime !== "string" || !service.runtimes.has(body.defaultRuntime))) {
       return c.json({ error: "Unknown runtime" }, 400);
@@ -233,8 +235,16 @@ export function createApp(deps: AppDeps): Hono {
       crossSessionMemory: body.crossSessionMemory as boolean | undefined,
       memoryResetAt: body.resetMemory === true ? Date.now() : undefined,
       theme: body.theme as "dark" | "light" | undefined,
+      learningMap: body.learningMap as boolean | undefined,
     });
     return c.json(service.preferences());
+  });
+
+  // The learning map: concepts from the developer's sessions and the sessions behind each one.
+  api.get("/learning-map", (c) => c.json(buildLearningMap(service.store)));
+  api.delete("/learning-map", (c) => {
+    service.store.clearLearningMap();
+    return c.json(buildLearningMap(service.store));
   });
 
   api.get("/workspaces", (c) => c.json(service.store.listWorkspaces()));

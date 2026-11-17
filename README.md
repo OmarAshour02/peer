@@ -103,6 +103,8 @@ Peer's API listens on `127.0.0.1` and requires an access token. Workspaces, sess
 
 Cross-session memory derives recent delegation tendencies and mode/model habits from local history. It is on by default and can be disabled or reset in settings; it does not carry answers, decisions, or topics into new sessions.
 
+The learning map (the map icon next to search, or ⌘G / Ctrl+G) draws the concepts from your sessions as a graph, brighter the further you reasoned about each one, with links back to the chats behind every topic. The agent tags topics as it works; nothing extra is sent to a model. Tagging can be turned off and the map cleared in settings.
+
 | Environment variable | Purpose |
 | --- | --- |
 | `PEER_DATA_DIR` | Override the app's data directory. Useful for an isolated development profile. |

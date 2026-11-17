@@ -13,6 +13,8 @@ export function RuntimeSettingsDialog() {
   const [form, setForm] = useState<RuntimeSettings>(DEFAULT_RUNTIME_SETTINGS);
   const [memoryOn, setMemoryOn] = useState(true);
   const [memoryResetAt, setMemoryResetAt] = useState(0);
+  const [mapOn, setMapOn] = useState(true);
+  const [mapCleared, setMapCleared] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -27,6 +29,7 @@ export function RuntimeSettingsDialog() {
         setForm(p.runtimeSettings);
         setMemoryOn(p.crossSessionMemory);
         setMemoryResetAt(p.memoryResetAt);
+        setMapOn(p.learningMap);
         setLoaded(true);
       })
       .catch((err: Error) => setLoadError(err.message));
@@ -146,6 +149,47 @@ export function RuntimeSettingsDialog() {
                   >
                     Reset what Peer remembers
                   </button>
+                </div>
+              </section>
+
+              <section>
+                <SectionTitle>Learning map</SectionTitle>
+                <p className="mb-2 text-[12px] text-faint">
+                  The agent tags the concepts each turn deals with in a short hidden note, and Peer draws them in the learning map with links back to the chats. Local only; topics are never sent to the agent in another session. Off: new turns add nothing (and the agent isn't asked to tag).
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    role="switch"
+                    aria-checked={mapOn}
+                    onClick={() => {
+                      if (!api) return;
+                      const next = !mapOn;
+                      setMapOn(next);
+                      api
+                        .setPreferences({ learningMap: next })
+                        .then(() => usePeer.setState((s) => ({ learningMapVersion: s.learningMapVersion + 1 })))
+                        .catch((err: Error) => setSaveError(err.message));
+                    }}
+                    className="rounded-md border border-line bg-raised px-3 py-1 text-[12px] hover:border-accent/60"
+                  >
+                    Topic tagging: {mapOn ? "on" : "off"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (!api || !window.confirm("Clear the learning map? Every topic and its links are removed. Your chats are not changed.")) return;
+                      api
+                        .clearLearningMap()
+                        .then(() => {
+                          setMapCleared(true);
+                          usePeer.setState((s) => ({ learningMapVersion: s.learningMapVersion + 1 }));
+                        })
+                        .catch((err: Error) => setSaveError(err.message));
+                    }}
+                    className="rounded-md border border-line bg-raised px-3 py-1 text-[12px] hover:border-accent/60"
+                  >
+                    Clear the map
+                  </button>
+                  {mapCleared && <span className="text-[12px] text-muted">Cleared.</span>}
                 </div>
               </section>
 

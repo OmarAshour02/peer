@@ -74,6 +74,33 @@ export function SidebarToggle({ open, onToggle, className = "" }: { open: boolea
   );
 }
 
+/**
+ * Opens the learning map (⌘G / Ctrl+G): the concepts from every session, as a constellation. It
+ * sits with search: both are destinations across every project, not places you work.
+ */
+export function LearningMapButton({ className = "" }: { className?: string }) {
+  const open = usePeer((s) => s.learningMapOpen);
+  const mac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+  return (
+    <button
+      onClick={() => usePeer.getState().setLearningMapOpen(!open)}
+      aria-label="Learning map"
+      aria-pressed={open}
+      aria-keyshortcuts={mac ? "Meta+G" : "Control+G"}
+      title={`Learning map: the concepts you've worked through, and the chats behind each one (${mac ? "⌘G" : "Ctrl+G"})`}
+      className={`flex h-7 w-7 items-center justify-center rounded-md ${open ? "bg-raised text-fg" : "text-faint hover:bg-raised hover:text-muted"} ${className}`}
+    >
+      {/* Drawn like its neighbours: 16px, 1.6 stroke. Three stars and the lines that join them. */}
+      <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="5.5" cy="7" r="2" />
+        <circle cx="17.5" cy="5.5" r="2" />
+        <circle cx="12" cy="17.5" r="2.5" />
+        <path d="M7.4 7.7 15.6 6M6.6 8.8l3.9 6.6M16.6 7.4l-3.4 7.9" />
+      </svg>
+    </button>
+  );
+}
+
 /** Opens search (⌘K / Ctrl+K). */
 export function SearchButton({ onSearch, className = "" }: { onSearch: () => void; className?: string }) {
   const mac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -128,6 +155,7 @@ export function Sidebar({ onClose, onSearch }: { onClose: () => void; onSearch: 
           </div>
           <div className="-mr-1.5 flex items-center gap-0.5">
             <SearchButton onSearch={onSearch} />
+            <LearningMapButton />
             {connected && (
               <button
                 onClick={() => usePeer.getState().setSettingsOpen(true)}

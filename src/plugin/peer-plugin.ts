@@ -63,6 +63,7 @@ export const PeerCollaboration: Plugin = async () => {
             .optional()
             .describe("Discrete choices, if any"),
           recommendation: tool.schema.string().optional().describe("Label of the option you recommend"),
+          topics: tool.schema.array(tool.schema.string()).optional().describe("1-3 concepts the question is about, for the developer's learning map"),
         },
         async execute(args, ctx) {
           ctx.metadata({ title: args.question.slice(0, 80) });

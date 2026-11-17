@@ -75,18 +75,64 @@ describe("rich markdown in agent replies", () => {
     expect(host.querySelector(".katex .stream-word")).toBeNull();
   });
 
-  it("draws a mermaid block once the reply is complete, not while it streams", async () => {
-    await show(DIAGRAM, true);
+  it("draws a mermaid block as soon as its closing fence arrives, while the reply streams on", async () => {
+    // The fence is still open: its source is partial, so it stays code.
+    await show("Here is the flow:\n\n```mermaid\nflowchart LR\n  A[request] --> B", true);
     await advance(1500);
     await flush();
     expect(render).not.toHaveBeenCalled();
     expect(host.querySelector("code.language-mermaid")).not.toBeNull();
 
-    await show(DIAGRAM, false);
+    // The fence closes and more prose streams after it: the diagram draws now, mid-reply.
+    await show(`${DIAGRAM}\nNext, the cache`, true);
+    await advance(1500);
     await flush();
     expect(render).toHaveBeenCalledTimes(1);
     expect(render.mock.calls[0]![1]).toBe("flowchart LR\n  A[request] --> B[cache]");
     expect(host.querySelector(".mermaid-diagram svg")).not.toBeNull();
+    expect(host.querySelector(".streaming")).not.toBeNull();
+
+    // The reply finishes: the diagram on screen is not drawn again.
+    await show(`${DIAGRAM}\nNext, the cache layer.`, false);
+    await flush();
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(host.querySelector(".mermaid-diagram svg")).not.toBeNull();
+  });
+
+  it("a closed diagram inside a blockquote or a list item also draws while the reply streams", async () => {
+    await show("> ```mermaid\n> flowchart LR\n> A --> B\n> ```\n\nStill writing", true);
+    await advance(1500);
+    await flush();
+    expect(render).toHaveBeenCalledTimes(1);
+    await show("- Step one:\n\n  ```mermaid\n  flowchart LR\n  C --> D\n  ```\n\nStill writing", true);
+    await advance(1500);
+    await flush();
+    expect(render).toHaveBeenCalledTimes(2);
+    // Still open inside the quote: code, not a diagram.
+    await show("> ```mermaid\n> flowchart LR\n> E --> F", true);
+    await advance(1500);
+    await flush();
+    expect(render).toHaveBeenCalledTimes(2);
+    // An unfinished top-level block whose content has a line that only looks like a quoted fence.
+    await show("```mermaid\nflowchart LR\nG --> H\n> ```", true);
+    await advance(1500);
+    await flush();
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(host.querySelector("code.language-mermaid")).not.toBeNull();
+    // Closed with nothing after it yet (the stream stopped right at the fence).
+    await show("```mermaid\nflowchart LR\nI --> J\n```", true);
+    await advance(1500);
+    await flush();
+    expect(render).toHaveBeenCalledTimes(3);
+    // Carriage-return line endings, alone or with newlines.
+    await show("```mermaid\rflowchart LR\rK --> L\r```\r\rStill writing", true);
+    await advance(1500);
+    await flush();
+    expect(render).toHaveBeenCalledTimes(4);
+    await show("```mermaid\r\nflowchart LR\r\nM --> N\r\n```\r\n\r\nStill writing", true);
+    await advance(1500);
+    await flush();
+    expect(render).toHaveBeenCalledTimes(5);
   });
 
   it("falls back to the source when a diagram does not parse", async () => {

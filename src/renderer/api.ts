@@ -11,6 +11,7 @@ import type {
   PeerMessage,
   PeerSession,
   PermissionReply,
+  LearningMap,
   Preferences,
   ProviderCatalog,
   RuntimeInfo,
@@ -104,6 +105,8 @@ export class PeerApi {
   removeLocalServer = (kind: RuntimeKind, id: string) => this.request<ProviderCatalog>("DELETE", `/runtimes/${kind}/local-servers/${encodeURIComponent(id)}`);
   preferences = () => this.request<Preferences>("GET", "/preferences");
   setPreferences = (prefs: Partial<Preferences> & { resetMemory?: boolean }) => this.request<Preferences>("PATCH", "/preferences", prefs);
+  learningMap = () => this.request<LearningMap>("GET", "/learning-map");
+  clearLearningMap = () => this.request<LearningMap>("DELETE", "/learning-map");
   workspaces = () => this.request<Workspace[]>("GET", "/workspaces");
   addWorkspace = (path: string) => this.request<Workspace>("POST", "/workspaces", { path });
   removeWorkspace = (id: string) => this.request("DELETE", `/workspaces/${id}`);
