@@ -1,10 +1,11 @@
 // The learning map: the agent tags each turn's concepts (a hidden note, and topics on its
 // questions); Peer records them only from real turns, caps the claimed level by what it saw, and
 // builds the graph. Deterministic: a fake runtime supplies the agent's replies.
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
 import { createApp } from "../src/server/app.js";
 import { buildLearningMap } from "../src/server/collaboration/topics.js";
 import { EventHub } from "../src/server/hub.js";
@@ -347,6 +348,38 @@ describe("telling the UI", () => {
     await service.send(s.id, "next");
     await ask(s, ["Eviction"], "tradeoff");
     expect(updates()).toBe(2);
+  });
+
+  it("emits learningMap.updated when a chat with topics is deleted or a turn is undone", async () => {
+    const events: PeerEvent[] = [];
+    const hub = new EventHub();
+    hub.subscribe((e) => events.push(e));
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "a.txt"), "base\n");
+    execFileSync("git", ["-c", "user.email=d@e.x", "-c", "user.name=d", "commit", "-qm", "init", "--allow-empty"], { cwd: dir });
+    runtime = new FakeRuntime();
+    runtime.getMessages = async () => replies;
+    const snapshots = realpathSync(mkdtempSync(join(tmpdir(), "peer-map-snap-")));
+    onTestFinished(() => rmSync(snapshots, { recursive: true, force: true }));
+    service = new PeerService(store, new RuntimeSet([runtime]), hub, { snapshotDir: snapshots });
+    const updates = () => events.filter((e) => e.type === "learningMap.updated").length;
+
+    // A chat without topics: deleting it leaves the map as it was, so nothing is announced.
+    const quiet = await newSession();
+    await turn(quiet, "small talk", "Hi!");
+    await service.deleteSession(quiet.id);
+    expect(updates()).toBe(0);
+
+    const s = await newSession();
+    await turn(s, "t1", note(["Kept"]));
+    await turn(s, "t2", note(["Undone"]));
+    expect(updates()).toBe(2);
+    await service.undoLastTurn(s.id);
+    expect(updates()).toBe(3);
+    expect(buildLearningMap(store).topics.map((t) => t.name)).toEqual(["Kept"]);
+    await service.deleteSession(s.id);
+    expect(updates()).toBe(4);
+    expect(buildLearningMap(store).topics).toEqual([]);
   });
 });
 

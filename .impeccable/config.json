@@ -1,3 +1,18 @@
 {
-  "buildPath": "code"
+  "buildPath": "code",
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "src/renderer/styles.css"
+        ],
+        "createdAt": "2026-11-17T17:53:36.250Z",
+        "reason": "Claude triage: L292 is the .markdown blockquote rule, a 3px neutral --color-line quote bar (standard blockquote styling, not a colored card accent); predates this session (commit 30952be)"
+      }
+    ]
+  }
 }

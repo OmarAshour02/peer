@@ -182,7 +182,10 @@ export class PeerService {
   async deleteSession(sessionId: string) {
     this.requireSession(sessionId);
     if (this.engine.statusOf(sessionId) !== "idle") await this.abort(sessionId);
+    const hadTopics = this.store.sessionTopicNames(sessionId).length > 0;
     this.store.deleteSession(sessionId);
+    // Its topics leave the map; every open map reloads, not only the window that deleted it.
+    if (hadTopics) this.hub.emit({ type: "learningMap.updated" });
   }
 
   snapshot(sessionId: string): SessionSnapshot {
@@ -202,6 +205,8 @@ export class PeerService {
   async undoLastTurn(sessionId: string): Promise<UndoResult> {
     const result = await this.engine.undoLastTurn(sessionId);
     this.hub.emit({ type: "session.undone", sessionId, result });
+    // Topics from undone turns leave the map.
+    if (result.turns > 0) this.hub.emit({ type: "learningMap.updated" });
     return result;
   }
 

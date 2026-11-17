@@ -12,6 +12,7 @@ import { LearningMapButton, SearchButton, Sidebar, SidebarToggle } from "./compo
 import { ThreadBackdrop, Transcript } from "./components/Transcript";
 import { MODE_UI } from "./modes";
 import { RUNTIME_UI } from "./runtimes";
+import { useGlobalShortcuts } from "./shortcuts";
 import { activeRuntime, runtimeInfo, usePeer } from "./store";
 
 
@@ -30,24 +31,8 @@ export function App() {
   // Each session starts with the panel closed, even if it was open in the previous one.
   useEffect(() => setShowChanges(false), [activeSessionId]);
   const [searchOpen, setSearchOpen] = useState(false);
-  // ⌘K / Ctrl+K opens search from anywhere (and closes it again).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
-      const key = e.key.toLowerCase();
-      if (key === "k") {
-        e.preventDefault();
-        setSearchOpen((open) => !open);
-      } else if (key === "g") {
-        // ⌘G / Ctrl+G opens and closes the learning map.
-        e.preventDefault();
-        const { learningMapOpen, setLearningMapOpen } = usePeer.getState();
-        setLearningMapOpen(!learningMapOpen);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  // ⌘K / Ctrl+K toggles search and ⌘G / Ctrl+G the learning map, from anywhere.
+  useGlobalShortcuts(() => setSearchOpen((open) => !open));
   // The sidebar stays as the developer last left it (a per-window convenience; open if unknown).
   const [sidebarOpen, setSidebarOpenState] = useState(() => {
     try {

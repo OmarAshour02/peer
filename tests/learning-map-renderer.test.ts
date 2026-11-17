@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { LearningMapView } from "../src/renderer/components/LearningMap.js";
 import { RuntimeSettingsDialog } from "../src/renderer/components/RuntimeSettingsDialog.js";
 import { LearningMapButton } from "../src/renderer/components/Sidebar.js";
+import { useGlobalShortcuts } from "../src/renderer/shortcuts.js";
 import { usePeer } from "../src/renderer/store.js";
 import { DEFAULT_RUNTIME_SETTINGS, type LearningMap } from "../src/shared/types.js";
 
@@ -143,4 +144,40 @@ it("reloads after the event stream reconnects (updates sent meanwhile are not re
   Object.assign(api, { health: async () => ({ runtimes: [] }), models: async () => ({ providers: [], default: null }) });
   await act(async () => usePeer.getState().reconnected());
   expect(host.textContent).toContain("2 topics");
+});
+
+it("⌘G and Ctrl+G toggle the map from anywhere, a text field included; Alt and Shift combinations do not", async () => {
+  usePeer.setState({ learningMapOpen: false });
+  const toggleSearch = vi.fn();
+  function Shortcuts() {
+    useGlobalShortcuts(toggleSearch);
+    return createElement("input");
+  }
+  await act(async () => root.render(createElement(Shortcuts)));
+  const input = host.querySelector("input")!;
+  input.focus();
+  const press = (init: KeyboardEventInit) => {
+    const e = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    act(() => void input.dispatchEvent(e));
+    return e;
+  };
+  const open = () => usePeer.getState().learningMapOpen;
+
+  expect(press({ key: "g", metaKey: true }).defaultPrevented).toBe(true);
+  expect(open()).toBe(true);
+  press({ key: "g", metaKey: true });
+  expect(open()).toBe(false);
+  press({ key: "G", ctrlKey: true });
+  expect(open()).toBe(true);
+  press({ key: "g", ctrlKey: true });
+  expect(open()).toBe(false);
+
+  for (const init of [{ key: "g", metaKey: true, shiftKey: true }, { key: "g", ctrlKey: true, altKey: true }, { key: "g" }]) {
+    expect(press(init).defaultPrevented).toBe(false);
+    expect(open()).toBe(false);
+  }
+
+  press({ key: "k", metaKey: true });
+  expect(toggleSearch).toHaveBeenCalledTimes(1);
+  expect(open()).toBe(false);
 });
