@@ -1,6 +1,7 @@
 {
   "name": "peer",
   "productName": "Peer",
+  "desktopName": "peer.desktop",
   "version": "0.2.0-alpha.1",
   "description": "AI coding that makes developers better, not just faster.",
   "private": true,

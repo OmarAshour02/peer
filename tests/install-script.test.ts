@@ -63,7 +63,19 @@ describe.runIf(isMac || isLinux)("scripts/install.sh", () => {
       execFileSync("codesign", ["--force", "--deep", "-s", "-", app]);
       execFileSync("ditto", ["-c", "-k", "--keepParent", app, join(dir, asset)]);
     } else {
-      writeFileSync(join(dir, asset), "#!/bin/sh\necho stand-in \"$@\"\n");
+      // Like the real AppImage: `--appimage-extract <path>` unpacks that file into ./squashfs-root.
+      writeFileSync(
+        join(dir, asset),
+        [
+          "#!/bin/sh",
+          'if [ "$1" = --appimage-extract ]; then',
+          '  case "$2" in */512x512/*) mkdir -p "squashfs-root/$(dirname "$2")" && printf PNG-STAND-IN > "squashfs-root/$2" ;; esac',
+          "  exit 0",
+          "fi",
+          'echo stand-in "$@"',
+          "",
+        ].join("\n"),
+      );
     }
     writeSums();
     server = createServer((req, res) => {
@@ -101,7 +113,11 @@ describe.runIf(isMac || isLinux)("scripts/install.sh", () => {
       const image = join(dest, "Peer.AppImage");
       expect(execFileSync(image, ["--hi"]).toString()).toContain("stand-in --hi");
       expect(readlinkSync(join(home, ".local", "bin", "peer"))).toBe(image);
-      expect(readFileSync(join(home, ".local", "share", "applications", "peer.desktop"), "utf8")).toContain(`Exec="${image}"`);
+      const desktop = readFileSync(join(home, ".local", "share", "applications", "peer.desktop"), "utf8");
+      expect(desktop).toContain(`Exec="${image}"`);
+      expect(desktop).toMatch(/^StartupWMClass=peer$/m);
+      expect(desktop).toMatch(/^Icon=peer$/m);
+      expect(readFileSync(join(home, ".local", "share", "icons", "hicolor", "512x512", "apps", "peer.png"), "utf8")).toBe("PNG-STAND-IN");
     }
   });
 

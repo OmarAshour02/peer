@@ -173,6 +173,19 @@ install_linux() {
   mv -f "$image.new" "$image"
   ln -sf "$image" "$bin_dir/peer"
 
+  # The launcher icon comes from the AppImage itself (it can unpack files without FUSE).
+  icon_line=""
+  for size in 512x512 256x256; do
+    rel="usr/share/icons/hicolor/$size/apps/peer.png"
+    if (cd "$tmp" && "$image" --appimage-extract "$rel" >/dev/null 2>&1) && [ -f "$tmp/squashfs-root/$rel" ]; then
+      mkdir -p "$data_home/icons/hicolor/$size/apps"
+      cp "$tmp/squashfs-root/$rel" "$data_home/icons/hicolor/$size/apps/peer.png"
+      icon_line="Icon=peer"
+      break
+    fi
+  done
+
+  # StartupWMClass matches Peer's window class / app_id ("peer"), so the running window gets this icon.
   cat >"$data_home/applications/peer.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -181,6 +194,8 @@ Comment=AI coding that makes developers better, not just faster.
 Exec="$image" %U
 Terminal=false
 Categories=Development;
+StartupWMClass=peer
+$icon_line
 EOF
 
   say ""
@@ -189,9 +204,11 @@ EOF
     *":$bin_dir:"*) say "Run it with: peer" ;;
     *) say "Run it with: $bin_dir/peer   (add $bin_dir to your PATH to use just 'peer')" ;;
   esac
-  if command -v ldconfig >/dev/null 2>&1 && ! ldconfig -p 2>/dev/null | grep -q 'libfuse\.so\.2'; then
-    say "Note: AppImages need FUSE 2 (libfuse2). On Ubuntu/Debian: sudo apt install libfuse2t64 (or libfuse2)."
-    say "      Or use the .deb from https://github.com/${PEER_REPO:-OmarAshour02/peer}/releases instead."
+  # The AppImage mounts itself with FUSE (fusermount3 or fusermount). It needs no FUSE libraries,
+  # but without the mount helper it can only run by unpacking itself each time.
+  if ! command -v fusermount3 >/dev/null 2>&1 && ! command -v fusermount >/dev/null 2>&1; then
+    say "Note: FUSE isn't installed, so the AppImage can't mount itself. Install it (Ubuntu/Debian: sudo apt install fuse3),"
+    say "      or run Peer with APPIMAGE_EXTRACT_AND_RUN=1, or use the .deb from https://github.com/${PEER_REPO:-OmarAshour02/peer}/releases."
   fi
 }
 
