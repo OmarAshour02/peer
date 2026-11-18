@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { PeerSession } from "../../shared/types";
+import { useModalDialog } from "../dialog";
 import { usePeer } from "../store";
 import { ProviderIcon } from "./ProviderIcon";
+import { ActivityMark } from "./ActivityMark";
 
 /**
  * Find a chat or session by title, across Chats and every project. Opened from the sidebar's search
@@ -19,6 +21,8 @@ export function SearchDialog({ onClose }: { onClose: () => void }) {
   const [openWhenReady, setOpenWhenReady] = useState(false);
   const fresh = resultsFor === query;
   const list = useRef<HTMLUListElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+  useModalDialog(dialog, onClose);
 
   useEffect(() => {
     if (!api) return;
@@ -68,7 +72,7 @@ export function SearchDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-8 pt-[12vh]" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div role="dialog" aria-label="Search chats and sessions" className="w-full max-w-xl overflow-hidden rounded-xl border border-line bg-panel shadow-composer">
+      <div ref={dialog} role="dialog" aria-modal="true" aria-label="Search chats and sessions" tabIndex={-1} className="w-full max-w-xl overflow-hidden rounded-xl border border-line bg-panel shadow-composer">
         <div className="flex items-center gap-2 border-b border-line/70 px-4">
           <SearchIcon className="h-4 w-4 shrink-0 text-faint" />
           <input
@@ -80,8 +84,7 @@ export function SearchDialog({ onClose }: { onClose: () => void }) {
             }}
             onKeyDown={(e) => {
               const n = results?.length ?? 0;
-              if (e.key === "Escape") onClose();
-              else if (e.key === "ArrowDown" && n > 0) {
+              if (e.key === "ArrowDown" && n > 0) {
                 e.preventDefault();
                 setActive((i) => (i + 1) % n);
               } else if (e.key === "ArrowUp" && n > 0) {
@@ -104,7 +107,7 @@ export function SearchDialog({ onClose }: { onClose: () => void }) {
         </div>
         <ul id="search-results" ref={list} role="listbox" aria-label="Results" aria-busy={!fresh} className={`max-h-[50vh] overflow-y-auto p-1.5 ${fresh ? "" : "opacity-60"}`}>
           {fresh && results !== null && results.length === 0 && (
-            <li className="px-3 py-6 text-center text-[13px] text-faint">{query.trim() ? `Nothing titled "${query.trim()}".` : "No chats or sessions yet."}</li>
+            <li className="px-3 py-6 text-center text-[13px] text-faint">{query.trim() ? `No chat or session titled "${query.trim()}". Search matches titles only.` : "No chats or sessions yet."}</li>
           )}
           {results?.map((s, i) => (
             <li
@@ -121,6 +124,7 @@ export function SearchDialog({ onClose }: { onClose: () => void }) {
                 <ProviderIcon runtime={s.runtime} className="h-3 w-3" />
               </span>
               <span className="min-w-0 flex-1 truncate">{s.title}</span>
+              <ActivityMark sessionId={s.id} />
               <span className="shrink-0 text-[11px] text-faint">{where(s)}</span>
             </li>
           ))}

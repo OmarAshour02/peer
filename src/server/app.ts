@@ -6,11 +6,15 @@ import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import {
   CHECKPOINT_ACTIONS,
+  CLAUDE_EFFORTS,
   CLAUDE_PERMISSION_MODES,
+  DEFAULT_RUNTIME_SETTINGS,
+  isEffortValue,
   COLLABORATION_MODES,
   isPrimaryMode,
   TURN_INTENTS,
   type CheckpointAction,
+  type ClaudeEffort,
   type ClaudePermissionMode,
   type CollaborationModeId,
   type LocalServerKind,
@@ -73,7 +77,7 @@ const isIntent = (i: unknown): i is TurnIntent => TURN_INTENTS.includes(i as Tur
  */
 export function normalizeRuntimeSettings(v: unknown, previous?: RuntimeSettings): RuntimeSettings {
   if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("runtimeSettings must be an object");
-  const base: RuntimeSettings = previous ?? { claudeBin: null, codexBin: null, geminiBin: null, claudePermissionMode: "acceptEdits", codexEffort: null };
+  const base: RuntimeSettings = { ...DEFAULT_RUNTIME_SETTINGS, ...previous };
   const next: RuntimeSettings = { ...base };
   const bin = (key: "claudeBin" | "codexBin" | "geminiBin") => {
     const raw = (v as Record<string, unknown>)[key];
@@ -97,6 +101,11 @@ export function normalizeRuntimeSettings(v: unknown, previous?: RuntimeSettings)
     const trimmed = typeof effort === "string" ? effort.trim() : "";
     if (trimmed.length > 64) throw new Error("codexEffort is too long");
     next.codexEffort = trimmed ? trimmed : null;
+  }
+  const claudeEffort = (v as Record<string, unknown>).claudeEffort;
+  if (claudeEffort !== undefined) {
+    if (claudeEffort !== null && !CLAUDE_EFFORTS.includes(claudeEffort as ClaudeEffort)) throw new Error(`claudeEffort must be one of ${CLAUDE_EFFORTS.join(", ")}, or null`);
+    next.claudeEffort = claudeEffort as ClaudeEffort | null;
   }
   return next;
 }
@@ -376,6 +385,7 @@ export function createApp(deps: AppDeps): Hono {
   );
 
   api.get("/sessions", (c) => c.json(service.store.searchSessions(c.req.query("q") ?? "")));
+  api.get("/activity", (c) => c.json(service.activity()));
   api.get("/sessions/:id", (c) => {
     try {
       return c.json(service.snapshot(c.req.param("id")));
@@ -383,9 +393,17 @@ export function createApp(deps: AppDeps): Hono {
       return fail(c, err);
     }
   });
+  api.get("/sessions/:id/effort-default", async (c) => {
+    try {
+      return c.json(await service.effortDefault(c.req.param("id")));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
   api.patch("/sessions/:id", async (c) => {
     try {
-      const body = await c.req.json<{ mode?: unknown; model?: unknown; title?: unknown; autoApprovals?: unknown; approachGate?: unknown; yolo?: unknown; discussing?: unknown }>();
+      const body = await c.req.json<{ mode?: unknown; model?: unknown; effort?: unknown; title?: unknown; autoApprovals?: unknown; approachGate?: unknown; yolo?: unknown; discussing?: unknown }>();
+      if (body.effort !== undefined && body.effort !== null && !isEffortValue(body.effort)) return c.json({ error: "effort must be an effort level (like \"medium\") or null" }, 400);
       if (body.mode !== undefined && !isMode(body.mode)) return c.json({ error: "Unknown mode" }, 400);
       if (body.autoApprovals !== undefined && typeof body.autoApprovals !== "boolean") return c.json({ error: "autoApprovals must be true or false" }, 400);
       if (body.approachGate !== undefined && typeof body.approachGate !== "boolean") return c.json({ error: "approachGate must be true or false" }, 400);
@@ -395,6 +413,7 @@ export function createApp(deps: AppDeps): Hono {
         service.updateSession(c.req.param("id"), {
           mode: body.mode as CollaborationModeId | undefined,
           model: parseModel(body.model),
+          effort: body.effort as string | null | undefined,
           title: typeof body.title === "string" ? body.title : undefined,
           autoApprovals: body.autoApprovals as boolean | undefined,
           approachGate: body.approachGate as boolean | undefined,
@@ -408,6 +427,8 @@ export function createApp(deps: AppDeps): Hono {
   });
   api.delete("/sessions/:id", async (c) => {
     try {
+      // ?ifUnused=1: only a session the developer never used (see PeerService.discardIfUnused).
+      if (c.req.query("ifUnused") === "1") return c.json({ deleted: await service.discardIfUnused(c.req.param("id")) });
       await service.deleteSession(c.req.param("id"));
       return c.json({ ok: true });
     } catch (err) {
@@ -435,6 +456,23 @@ export function createApp(deps: AppDeps): Hono {
       if (typeof body.text !== "string") return c.json({ error: "text is required" }, 400);
       if (body.intent !== undefined && !isIntent(body.intent)) return c.json({ error: "Unknown intent" }, 400);
       return c.json(await service.send(c.req.param("id"), body.text, body.intent as TurnIntent | undefined));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+  api.post("/sessions/:id/queue", async (c) => {
+    try {
+      const body = await c.req.json<{ text?: unknown; intent?: unknown }>();
+      if (typeof body.text !== "string") return c.json({ error: "text is required" }, 400);
+      if (body.intent !== undefined && !isIntent(body.intent)) return c.json({ error: "Unknown intent" }, 400);
+      return c.json(await service.queueMessage(c.req.param("id"), body.text, body.intent as TurnIntent | undefined));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+  api.delete("/sessions/:id/queue", (c) => {
+    try {
+      return c.json({ returned: service.unqueueMessage(c.req.param("id")) });
     } catch (err) {
       return fail(c, err);
     }

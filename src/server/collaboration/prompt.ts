@@ -56,7 +56,8 @@ export function learningMapInstructions(tool: string, sessionTopics: readonly st
     "## Learning map",
     "Peer keeps a map of the concepts the developer has worked through. End the reply that finishes your turn with one line Peer reads and hides from the developer, for example:",
     `${TOPIC_NOTE_PREFIX} [{"name": "Sliding window rate limiting", "level": "engaged", "related": ["Redis sorted sets"]}] -->`,
-    "- name: an engineering concept the turn dealt with (a technique, mechanism, principle or design idea), in 1-5 words. Not file names, task names, commands or tools. List 0-4 topics; use [] for small talk or purely mechanical work.",
+    '- name: the engineering concept the turn dealt with (a technique, mechanism, principle or design idea), named at the level someone would study it on its own, in 1-4 words: "Tries", "Database indexing", "Consistent hashing". Not file names, task names, commands or tools.',
+    '- One concept is one topic. Its parts, properties, costs and edge cases belong to it: a turn about how a trie stores words and how fast lookup is tags "Tries", not "Trie node representation", "Trie lookup complexity" and "Word termination markers". Name a second topic only for a genuinely different concept the turn also taught (at most 3); use [] for small talk or purely mechanical work.',
     '- level: "encountered" (it came up), "engaged" (the developer reasoned about it themselves: explained, predicted, or chose with a reason), "demonstrated" (their own reasoning about it was correct, without hints). When unsure, use the lower level, and never credit the developer with your reasoning.',
     "- related: other concepts, in this line or earlier ones, that this one builds on or connects to.",
     `- Reuse a name exactly when the same concept comes up again. When you ask with \`${tool}\`, put the 1-3 concepts the question is about in its \`topics\` argument, with the same names.`,
@@ -84,6 +85,7 @@ export function composeSystemPrompt(plan: EffectivePolicy, tool: string = CHECKP
       ? [
           "## General chat",
           "This conversation is not tied to a project. Your working directory is a scratch folder Peer keeps for chats, not the developer's code: do not explore it for context. Where the guidance below says \"this codebase\", ground your questions and examples in what the developer brings to the conversation instead. Files you create here are scratch work (a snippet to run, a small experiment).",
+          "You can't see the developer's other chats or their learning map, and you should not look for them (in your own transcripts, logs or Peer's data): each search costs time and tokens and finds nothing you may use. If they ask what they have learned or covered before, answer from this conversation, and tell them the learning map (the map icon at the top of Peer's sidebar, or Cmd/Ctrl+G) shows every topic across their chats.",
           `Talk here like a conversation: ask teaching questions (a concept check, a prediction) in your reply as plain text and end your turn; the developer answers in the chat. Use the \`${tool}\` tool only when you need them to make a choice that changes what you do next (which topic to cover, which approach to take), not to quiz them.`,
           "",
         ]

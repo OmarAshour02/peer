@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import type { PeerSession, RuntimeKind, Workspace } from "../../shared/types";
+import { ActivityMark } from "./ActivityMark";
 import { MODE_UI } from "../modes";
 import { RUNTIME_UI, statusDot } from "../runtimes";
 import { ProviderIcon } from "./ProviderIcon";
@@ -248,20 +249,10 @@ function WorkspaceGroup({ ws }: { ws: Workspace }) {
   const { api, sessions, activeWorkspaceId, activeSessionId, runtimes, newRuntime } = usePeer();
   const setNewRuntime = usePeer((s) => s.setNewRuntime);
   const selectWorkspace = usePeer((s) => s.selectWorkspace);
-  const selectSession = usePeer((s) => s.selectSession);
   const setError = usePeer((s) => s.setError);
   const active = ws.id === activeWorkspaceId;
 
-  async function newSession() {
-    if (!api) return;
-    try {
-      if (!active) await selectWorkspace(ws.id);
-      const session = await api.createSession(ws.id, { runtime: newRuntime });
-      await selectSession(session.id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
+  const newSession = () => usePeer.getState().newSession(ws.id);
 
   async function removeProject() {
     if (!api) return;
@@ -290,6 +281,7 @@ function WorkspaceGroup({ ws }: { ws: Workspace }) {
             </svg>
           )}
           <span className="truncate">{ws.name}</span>
+          <WaitingCount workspaceId={ws.id} />
         </button>
         {!ws.general && (
           <button
@@ -325,8 +317,13 @@ function WorkspaceGroup({ ws }: { ws: Workspace }) {
                 ))}
             </select>
           </div>
-          {sessions.map((s) => (
-            <SessionRow key={s.id} session={s} active={s.id === activeSessionId} />
+          {sessions.map((s, i) => (
+            <SessionRow
+              key={s.id}
+              session={s}
+              active={s.id === activeSessionId}
+              tabbable={s.id === activeSessionId || (i === 0 && !sessions.some((x) => x.id === activeSessionId))}
+            />
           ))}
         </div>
       )}
@@ -334,8 +331,22 @@ function WorkspaceGroup({ ws }: { ws: Workspace }) {
   );
 }
 
+/** How many sessions in a workspace wait on the developer, so a closed project still says so. */
+function WaitingCount({ workspaceId }: { workspaceId: string }) {
+  const waiting = usePeer((st) => Object.values(st.activity).filter((a) => a.workspaceId === workspaceId && a.state === "waiting").length);
+  if (!waiting) return null;
+  const label = `${waiting} ${waiting === 1 ? "session waits" : "sessions wait"} for you`;
+  return (
+    <span className="ml-auto flex shrink-0 items-center gap-1 text-[11px] tabular-nums text-accent" title={label}>
+      <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-accent" />
+      <span aria-hidden="true">{waiting}</span>
+      <span className="sr-only">{label}</span>
+    </span>
+  );
+}
+
 /** A session in the sidebar: click to open, double-click (or the pencil) to rename, × to delete. */
-function SessionRow({ session: s, active }: { session: PeerSession; active: boolean }) {
+export function SessionRow({ session: s, active, tabbable }: { session: PeerSession; active: boolean; tabbable: boolean }) {
   const api = usePeer((st) => st.api);
   const selectSession = usePeer((st) => st.selectSession);
   const setError = usePeer((st) => st.setError);
@@ -373,6 +384,22 @@ function SessionRow({ session: s, active }: { session: PeerSession; active: bool
     }
   }
 
+  /** One tab stop for the whole list: arrows move between sessions, F2 renames, Delete removes. */
+  function onRowKey(e: React.KeyboardEvent<HTMLButtonElement>) {
+    if (e.key === "F2") {
+      e.preventDefault();
+      startRename();
+    } else if (e.key === "Delete" || (e.key === "Backspace" && e.metaKey)) {
+      e.preventDefault();
+      void remove();
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const rows = [...document.querySelectorAll<HTMLElement>("[data-session-row]")];
+      const at = rows.indexOf(e.currentTarget);
+      rows[Math.min(rows.length - 1, Math.max(0, at + (e.key === "ArrowDown" ? 1 : -1)))]?.focus();
+    }
+  }
+
   if (name !== null) {
     return (
       <form
@@ -403,18 +430,30 @@ function SessionRow({ session: s, active }: { session: PeerSession; active: bool
     <div
       className={`group flex w-full items-center gap-2 rounded px-2 py-1 text-[12px] ${active ? "bg-raised text-fg" : "text-muted hover:bg-raised/60"}`}
     >
-      <button onClick={() => void selectSession(s.id)} onDoubleClick={startRename} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+      <button
+        onClick={() => void selectSession(s.id)}
+        onDoubleClick={startRename}
+        onKeyDown={onRowKey}
+        tabIndex={tabbable ? 0 : -1}
+        data-session-row
+        aria-current={active ? "page" : undefined}
+        aria-keyshortcuts="F2 Delete"
+        title={`${s.title}  ·  F2 renames, Delete removes, ↑↓ move between sessions`}
+        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+      >
         {/* The runtime's own mark in its own colours; monochrome marks take the foreground. */}
         <span className="flex shrink-0 text-fg" title={`${RUNTIME_UI[s.runtime].label} · ${MODE_UI[s.mode].label}`}>
           <ProviderIcon runtime={s.runtime} className="h-3 w-3" />
         </span>
         <span className="min-w-0 flex-1 truncate">{s.title}</span>
+        <ActivityMark sessionId={s.id} />
       </button>
       <span className="hidden shrink-0 items-center gap-1 group-hover:flex group-focus-within:flex">
-        <button onClick={startRename} title="Rename" aria-label={`Rename ${s.title}`} className="px-0.5 text-faint hover:text-fg">
+        {/* Out of the tab order: one stop per session; F2 and Delete do these from the keyboard. */}
+        <button tabIndex={-1} onClick={startRename} title="Rename (F2)" aria-label={`Rename ${s.title}`} className="px-0.5 text-faint hover:text-fg">
           ✎
         </button>
-        <button onClick={() => void remove()} title="Delete" aria-label={`Delete ${s.title}`} className="px-0.5 text-faint hover:text-danger">
+        <button tabIndex={-1} onClick={() => void remove()} title="Delete (Delete key)" aria-label={`Delete ${s.title}`} className="px-0.5 text-faint hover:text-danger">
           ×
         </button>
       </span>

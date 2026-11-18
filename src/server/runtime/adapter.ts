@@ -136,7 +136,7 @@ export interface PromptInput {
   autoApprovals?: boolean;
   /** Tools to enable/disable for this turn. */
   tools?: Record<string, boolean>;
-  /** Reasoning effort for runtimes that take one (Codex `turn/start effort`). */
+  /** Reasoning effort for runtimes that take one (Codex `turn/start effort`, Claude Code `effort`). */
   effort?: string | null;
 }
 

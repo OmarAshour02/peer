@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import type { ModelsResponse, PeerMessage, PermissionReply, PermissionRequest, RuntimeStatus } from "../../../shared/types.js";
-import { CHECKPOINT_CATEGORIES } from "../../../shared/types.js";
+import type { ModelOption, ModelsResponse, PeerMessage, PermissionReply, PermissionRequest, RuntimeStatus, TokenUsage } from "../../../shared/types.js";
+import { CHECKPOINT_CATEGORIES, isEffortValue } from "../../../shared/types.js";
 import { CHECKPOINT_TOOL } from "../../collaboration/prompt.js";
 import { isDestructiveCommand, unwrapShell } from "../../collaboration/safety.js";
 import type { AgentRuntimeAdapter, PromptInput, RuntimeEvent, RuntimeHooks, RuntimeSettingsProvider } from "../adapter.js";
@@ -53,7 +53,28 @@ export function turnStartParams(threadId: string, input: PromptInput, model: str
     model,
     // The protocol takes any non-empty effort string; omit it for the account default.
     ...(input.effort ? { effort: input.effort } : {}),
+    // Stream reasoning summaries, so the developer sees what Codex is working through while it
+    // thinks (at high efforts that is often tens of seconds before the reply's first word). The
+    // summaries are a view of the reasoning; they don't change it or the answer.
+    summary: "auto",
   };
+}
+
+/** The parts of a `model/list` entry Peer reads. */
+interface CodexModel {
+  id: string;
+  displayName: string;
+  hidden: boolean;
+  isDefault: boolean;
+  supportedReasoningEfforts?: { reasoningEffort?: unknown }[];
+  defaultReasoningEffort?: unknown;
+}
+
+/** A Codex model for the picker, with the effort levels it supports (in Codex's order). */
+export function codexModelOption(m: CodexModel): ModelOption {
+  const efforts = (m.supportedReasoningEfforts ?? []).map((e) => e.reasoningEffort).filter(isEffortValue);
+  const defaultEffort = isEffortValue(m.defaultReasoningEffort) ? m.defaultReasoningEffort : undefined;
+  return { id: m.id, name: m.displayName || m.id, ...(efforts.length ? { efforts } : {}), ...(defaultEffort ? { defaultEffort } : {}) };
 }
 
 const MAX_RESTARTS = 5;
@@ -144,6 +165,8 @@ interface PendingApproval {
 /** Token counts in Codex's thread/tokenUsage/updated (running totals, or the last request). */
 interface TokenCounts {
   inputTokens?: number;
+  /** The part of inputTokens served from the prompt cache. */
+  cachedInputTokens?: number;
   outputTokens?: number;
 }
 
@@ -173,7 +196,7 @@ interface Run {
   /** The workspace the last test run that reached its tests ran against; undefined before one. */
   testedTree?: string | null;
   /** The thread's token totals before this turn (Codex reports running totals for the thread). */
-  usageBase?: { input: number; output: number };
+  usageBase?: { input: number; output: number; cached?: number };
 }
 
 /**
@@ -367,11 +390,11 @@ export class CodexAdapter implements AgentRuntimeAdapter {
   // -- adapter API --------------------------------------------------------------
 
   async listModels(): Promise<ModelsResponse> {
-    const res = await this.client().call<{ data: { id: string; displayName: string; hidden: boolean; isDefault: boolean }[] }>("model/list", {});
+    const res = await this.client().call<{ data: CodexModel[] }>("model/list", {});
     const models = res.data.filter((m) => !m.hidden);
     const def = models.find((m) => m.isDefault) ?? models[0];
     return {
-      providers: [{ id: "codex", name: "Codex", models: models.map((m) => ({ id: m.id, name: m.displayName || m.id })) }],
+      providers: [{ id: "codex", name: "Codex", models: models.map(codexModelOption) }],
       default: def ? { providerId: "codex", modelId: def.id } : null,
     };
   }
@@ -653,8 +676,13 @@ export class CodexAdapter implements AgentRuntimeAdapter {
         const usage = params.tokenUsage as { total?: TokenCounts; last?: TokenCounts } | undefined;
         const total = usage?.total;
         if (!total || typeof total.inputTokens !== "number" || typeof total.outputTokens !== "number") return;
-        run.usageBase ??= { input: total.inputTokens - (usage.last?.inputTokens ?? 0), output: total.outputTokens - (usage.last?.outputTokens ?? 0) };
-        const tokens = { input: Math.max(0, total.inputTokens - run.usageBase.input), output: Math.max(0, total.outputTokens - run.usageBase.output) };
+        run.usageBase ??= {
+          input: total.inputTokens - (usage.last?.inputTokens ?? 0),
+          output: total.outputTokens - (usage.last?.outputTokens ?? 0),
+          cached: (total.cachedInputTokens ?? 0) - (usage.last?.cachedInputTokens ?? 0),
+        };
+        const tokens: TokenUsage = { input: Math.max(0, total.inputTokens - run.usageBase.input), output: Math.max(0, total.outputTokens - run.usageBase.output) };
+        if (typeof total.cachedInputTokens === "number") tokens.cacheRead = Math.max(0, total.cachedInputTokens - (run.usageBase.cached ?? 0));
         transcript.upsertPart(run.messageId, { type: "step-finish", id: `${run.messageId}:usage`, tokens });
         return;
       }

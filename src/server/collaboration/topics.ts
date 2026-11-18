@@ -4,7 +4,7 @@
 // did by what it saw happen in the turn, so engagement is never taken on the agent's word alone.
 
 import { TOPIC_LEVELS, type LearningMap, type LearningMapLink, type LearningMapTopic, type PeerMessage, type TopicLevel, type Turn } from "../../shared/types.js";
-import { parseTopicNotes, topicKey } from "../../shared/topics.js";
+import { MAX_TOPICS_PER_NOTE, parseTopicNotes, topicKey } from "../../shared/topics.js";
 import type { Store } from "../store.js";
 
 /**
@@ -19,9 +19,34 @@ const rank = (level: TopicLevel) => TOPIC_LEVELS.indexOf(level);
 const lower = (a: TopicLevel, b: TopicLevel): TopicLevel => (rank(a) <= rank(b) ? a : b);
 const higher = (a: TopicLevel, b: TopicLevel): TopicLevel => (rank(a) >= rank(b) ? a : b);
 
+/**
+ * The names a turn may still add to the map: a turn keeps at most MAX_TOPICS_PER_NOTE topics,
+ * counting both its questions' topics and its reply notes. A topic the turn already has is always
+ * kept (it adds no star); new ones are taken in order until the budget is spent.
+ */
+export function withinTurnBudget(store: Store, turnId: string | null, names: readonly string[]): string[] {
+  const have = new Set(turnId ? store.turnTopicIds(turnId) : []);
+  const kept: string[] = [];
+  const keys = new Set<string>();
+  for (const name of names) {
+    const key = topicKey(name);
+    if (keys.has(key)) continue;
+    const id = store.topicIdByKey(key);
+    if (id && have.has(id)) {
+      keys.add(key);
+      kept.push(name);
+    } else if (have.size < MAX_TOPICS_PER_NOTE) {
+      have.add(id ?? `new:${key}`);
+      keys.add(key);
+      kept.push(name);
+    }
+  }
+  return kept;
+}
+
 /** Record the topics the agent tagged on a checkpoint question. Their level follows the developer's response. */
 export function recordCheckpointTopics(store: Store, sessionId: string, turnId: string | null, checkpointId: string, names: string[]) {
-  for (const name of names) {
+  for (const name of withinTurnBudget(store, turnId, names)) {
     const topicId = store.ensureTopic(topicKey(name), name);
     store.addTopicMention({ topicId, sessionId, turnId, checkpointId, level: "encountered" });
   }
@@ -83,7 +108,9 @@ export function recordTurnTopics(store: Store, sessionId: string, turn: Turn, me
     .map((p) => (p.type === "text" && !p.synthetic ? p.text : ""))
     // Joined as written: a note split across parts must read back as one.
     .join("");
-  const noted = parseTopicNotes(text);
+  const parsed = parseTopicNotes(text);
+  const allowed = new Set(withinTurnBudget(store, turn.id, parsed.map((t) => t.name)).map(topicKey));
+  const noted = parsed.filter((t) => allowed.has(topicKey(t.name)));
   if (noted.length === 0) return 0;
   const cap = levelCap(store, turn);
   const ids = new Map<string, string>();

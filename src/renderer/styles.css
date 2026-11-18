@@ -14,7 +14,7 @@
   --color-accent: #86b985;
   --color-accent-deep: #5e8f5c;
   --color-link: #7aa2c9;
-  --color-focus: #7fb069;
+  --color-focus: #86b985; /* the accent: additions and "ready" marks, never a second green (DESIGN.md) */
   --color-collab: #58a6ff;
   --color-learn: #d2a8ff;
   --color-warn: #d29922;
@@ -76,9 +76,19 @@ input:focus-visible,
 select:focus-visible {
   outline: none;
 }
-/* Focusable only from code (the transcript scroller, for example): not a control, so no focus ring. */
-[tabindex="-1"]:focus-visible {
+/* Fields draw focus as an accent border instead (the composer's container has its own). */
+select:focus-visible {
+  border-color: var(--color-accent);
+}
+/* Focusable only from code (the transcript scroller, a dialog's frame): not a control, so no
+   focus ring. Buttons out of the tab order (roving lists, radio groups) still show theirs. */
+[tabindex="-1"]:not(button):focus-visible {
   outline: none;
+}
+/* An open question takes the keyboard when it arrives: the ring says where focus went. */
+.checkpoint-card:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 ::selection {
@@ -271,6 +281,90 @@ select:focus-visible {
   background: none;
   border: none;
   padding: 0;
+}
+
+/* Syntax colors for fenced code (rehype-highlight's hljs classes), in both themes. */
+:root {
+  --code-keyword: #c4a7e7;
+  --code-string: #a8cc8c;
+  --code-number: #e0af68;
+  --code-comment: #6f7d6c;
+  --code-title: #82aad4;
+  --code-type: #7cc3bd;
+  --code-attr: #dba58a;
+  --code-meta: #9daa9c;
+  --code-deletion: #f0857e;
+}
+[data-theme="light"] {
+  --code-keyword: #7c4dbd;
+  --code-string: #3d7a3a;
+  --code-number: #94590e;
+  --code-comment: #85827b;
+  --code-title: #2a66a3;
+  --code-type: #19767a;
+  --code-attr: #9a4f2c;
+  --code-meta: #5f5c55;
+  --code-deletion: #c0362c;
+}
+.markdown .hljs-keyword,
+.markdown .hljs-selector-tag,
+.markdown .hljs-doctag,
+.markdown .hljs-template-tag {
+  color: var(--code-keyword);
+}
+.markdown .hljs-string,
+.markdown .hljs-regexp,
+.markdown .hljs-char.escape_,
+.markdown .hljs-addition,
+.markdown .hljs-template-variable {
+  color: var(--code-string);
+}
+.markdown .hljs-number,
+.markdown .hljs-literal,
+.markdown .hljs-symbol,
+.markdown .hljs-bullet,
+.markdown .hljs-variable.constant_ {
+  color: var(--code-number);
+}
+.markdown .hljs-comment,
+.markdown .hljs-quote {
+  color: var(--code-comment);
+  font-style: italic;
+}
+.markdown .hljs-title,
+.markdown .hljs-title.function_,
+.markdown .hljs-section {
+  color: var(--code-title);
+}
+.markdown .hljs-type,
+.markdown .hljs-built_in,
+.markdown .hljs-title.class_,
+.markdown .hljs-selector-class,
+.markdown .hljs-selector-id {
+  color: var(--code-type);
+}
+.markdown .hljs-attr,
+.markdown .hljs-attribute,
+.markdown .hljs-property,
+.markdown .hljs-name,
+.markdown .hljs-selector-attr,
+.markdown .hljs-selector-pseudo {
+  color: var(--code-attr);
+}
+.markdown .hljs-meta,
+.markdown .hljs-meta .hljs-keyword,
+.markdown .hljs-punctuation,
+.markdown .hljs-tag {
+  color: var(--code-meta);
+}
+.markdown .hljs-deletion {
+  color: var(--code-deletion);
+}
+.markdown .hljs-emphasis {
+  font-style: italic;
+}
+.markdown .hljs-strong {
+  font-weight: 600;
 }
 .markdown a {
   color: var(--color-link);

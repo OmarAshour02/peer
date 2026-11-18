@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { CODEX_EFFORTS, DEFAULT_RUNTIME_SETTINGS, type RuntimeSettings } from "../../shared/types";
+import { useEffect, useRef, useState } from "react";
+import { useModalDialog } from "../dialog";
+import { CLAUDE_EFFORTS, CODEX_EFFORTS, DEFAULT_RUNTIME_SETTINGS, type RuntimeSettings } from "../../shared/types";
 import { usePeer } from "../store";
 
 /**
@@ -35,11 +36,8 @@ export function RuntimeSettingsDialog() {
       .catch((err: Error) => setLoadError(err.message));
   }, [api]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  const dialog = useRef<HTMLDivElement>(null);
+  useModalDialog(dialog, close);
 
   async function save() {
     if (!api) return;
@@ -50,6 +48,7 @@ export function RuntimeSettingsDialog() {
       const prefs = await api.setPreferences({ runtimeSettings: form });
       setForm(prefs.runtimeSettings);
       setSaved(true);
+      usePeer.setState((s) => ({ settingsVersion: s.settingsVersion + 1 }));
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -64,7 +63,7 @@ export function RuntimeSettingsDialog() {
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-8" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-      <div role="dialog" aria-label="Runtime settings" className="w-full max-w-xl rounded-xl border border-line bg-panel shadow-composer">
+      <div ref={dialog} role="dialog" aria-modal="true" aria-label="Runtime settings" tabIndex={-1} className="w-full max-w-xl rounded-xl border border-line bg-panel shadow-composer">
         <div className="flex items-center border-b border-line px-5 py-3">
           <div className="flex-1 text-[15px] font-semibold">Runtime settings</div>
           <button onClick={close} className="text-[12px] text-faint hover:text-fg">
@@ -96,6 +95,24 @@ export function RuntimeSettingsDialog() {
                 >
                   <option value="acceptEdits">Accept edits (ask for the rest)</option>
                   <option value="auto">Auto (settle prompts, ask when unsure)</option>
+                </select>
+              </section>
+
+              <section>
+                <SectionTitle>Claude Code effort</SectionTitle>
+                <p className="mb-2 text-[12px] text-faint">How hard Claude thinks before it answers. Lower replies sooner and uses fewer tokens; Default keeps Claude Code&apos;s own setting.</p>
+                <select
+                  value={form.claudeEffort ?? ""}
+                  onChange={(e) => set("claudeEffort", (e.target.value || null) as RuntimeSettings["claudeEffort"])}
+                  aria-label="Claude Code effort"
+                  className="w-full rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] outline-none focus:border-accent"
+                >
+                  <option value="">Default</option>
+                  {CLAUDE_EFFORTS.map((e) => (
+                    <option key={e} value={e}>
+                      {e === "xhigh" ? "Extra high" : e[0]!.toUpperCase() + e.slice(1)}
+                    </option>
+                  ))}
                 </select>
               </section>
 

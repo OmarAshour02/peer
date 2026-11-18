@@ -34,7 +34,18 @@ export function normalizePart(part: OcPart): PeerPart | null {
     case "patch":
       return { type: "patch", id: part.id, files: part.files };
     case "step-finish":
-      return { type: "step-finish", id: part.id, tokens: { input: part.tokens.input, output: part.tokens.output }, cost: part.cost };
+      // OpenCode counts cached input apart from `input`; Peer's `input` is every input token read.
+      return {
+        type: "step-finish",
+        id: part.id,
+        tokens: {
+          input: part.tokens.input + (part.tokens.cache?.read ?? 0) + (part.tokens.cache?.write ?? 0),
+          output: part.tokens.output,
+          cacheRead: part.tokens.cache?.read ?? 0,
+          cacheWrite: part.tokens.cache?.write ?? 0,
+        },
+        cost: part.cost,
+      };
     case "file":
       return { type: "file", id: part.id, filename: part.filename ?? "file", mime: part.mime };
     default:

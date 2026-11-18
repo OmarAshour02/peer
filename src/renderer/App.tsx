@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { NOTHING_TO_UNDO } from "../shared/types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { PeerSession, Workspace } from "../shared/types";
 import { PeerApi, resolveConfig } from "./api";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { Constellation } from "./components/Constellation";
@@ -13,6 +13,7 @@ import { ThreadBackdrop, Transcript } from "./components/Transcript";
 import { MODE_UI } from "./modes";
 import { RUNTIME_UI } from "./runtimes";
 import { useGlobalShortcuts } from "./shortcuts";
+import { formatTokens, sessionUsage, usageDetail } from "./usage";
 import { activeRuntime, runtimeInfo, usePeer } from "./store";
 
 
@@ -31,8 +32,8 @@ export function App() {
   // Each session starts with the panel closed, even if it was open in the previous one.
   useEffect(() => setShowChanges(false), [activeSessionId]);
   const [searchOpen, setSearchOpen] = useState(false);
-  // ⌘K / Ctrl+K toggles search and ⌘G / Ctrl+G the learning map, from anywhere.
-  useGlobalShortcuts(() => setSearchOpen((open) => !open));
+  // ⌘K search, ⌘G learning map, ⌘N new session, ⌘L message box, ⌘\ sidebar, ⌘⇧M mode: from anywhere.
+  useGlobalShortcuts({ toggleSearch: () => setSearchOpen((open) => !open), toggleSidebar: () => setSidebarOpen(!sidebarOpenRef.current) });
   // The sidebar stays as the developer last left it (a per-window convenience; open if unknown).
   const [sidebarOpen, setSidebarOpenState] = useState(() => {
     try {
@@ -41,6 +42,8 @@ export function App() {
       return true;
     }
   });
+  const sidebarOpenRef = useRef(sidebarOpen);
+  sidebarOpenRef.current = sidebarOpen;
   const setSidebarOpen = (open: boolean) => {
     setSidebarOpenState(open);
     try {
@@ -92,6 +95,15 @@ export function App() {
 
   return (
     <div className="flex h-full" data-peer-ready="true">
+      {/* First stop for the keyboard: straight to the message box, past the sidebar. */}
+      {snapshot && !learningMapOpen && (
+        <button
+          onClick={() => usePeer.getState().focusComposer()}
+          className="sr-only z-50 rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-bg focus:not-sr-only focus:fixed focus:left-3 focus:top-3"
+        >
+          Skip to the message box (⌘L)
+        </button>
+      )}
       {providersOpen && <ProvidersDialog />}
       {settingsOpen && <RuntimeSettingsDialog />}
       {searchOpen && <SearchDialog onClose={() => setSearchOpen(false)} />}
@@ -166,19 +178,9 @@ export function App() {
                 <span className="text-[12px] text-faint">
                   {RUNTIME_UI[snapshot.session.runtime].label} · <span className={MODE_UI[snapshot.session.mode].color}>{MODE_UI[snapshot.session.mode].label}</span>
                 </span>
-                {snapshot.session.runtime === "codex" && workspace && <SandboxNetworkToggle workspaceId={workspace.id} on={workspace.sandboxNetwork} />}
-                {snapshot.session.runtime === "claude" && <AutoApprovalsToggle sessionId={snapshot.session.id} on={snapshot.session.autoApprovals} />}
-                {snapshot.session.runtime !== "gemini" && <YoloToggle sessionId={snapshot.session.id} on={snapshot.session.yolo} />}
-                {snapshot.session.mode === "collaborate" && <ApproachGateToggle sessionId={snapshot.session.id} on={snapshot.session.approachGate} />}
-                <UndoButton />
-                <button
-                  onClick={() => setShowChanges(!showChanges)}
-                  aria-pressed={showChanges}
-                  title={showChanges ? "Hide the changes panel" : "Show the changes panel"}
-                  className={`text-[12px] ${showChanges ? "text-fg" : "text-faint hover:text-fg"}`}
-                >
-                  Changes
-                </button>
+                <SessionUsage />
+                <SessionControls session={snapshot.session} workspace={workspace} />
+                <ChangesButton open={showChanges} onToggle={() => setShowChanges(!showChanges)} />
               </div>
             </header>
             <div className="relative flex min-h-0 flex-1">
@@ -186,7 +188,7 @@ export function App() {
                 <Transcript />
                 <Composer />
               </div>
-              {showChanges && <ChangesPanel onClose={() => setShowChanges(false)} />}
+              {showChanges && !workspace?.general && <ChangesPanel onClose={() => setShowChanges(false)} />}
             </div>
           </div>
         ) : (
@@ -197,148 +199,168 @@ export function App() {
   );
 }
 
-/** Codex runs commands in an OS sandbox without network unless the workspace allows it. */
-function SandboxNetworkToggle({ workspaceId, on }: { workspaceId: string; on: boolean }) {
-  const api = usePeer((s) => s.api);
-  async function toggle() {
-    if (!api) return;
-    try {
-      const ws = await api.updateWorkspace(workspaceId, { sandboxNetwork: !on });
-      usePeer.setState((s) => ({ workspaces: s.workspaces.map((w) => (w.id === ws.id ? ws : w)) }));
-    } catch (err) {
-      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
-    }
-  }
+/** The header's Changes toggle, with how many files the session has changed so far (projects only). */
+export function ChangesButton({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  const files = usePeer((s) => s.diff.length);
+  // A general chat has no project: no files to show.
+  const general = usePeer((s) => s.workspaces.find((w) => w.id === s.activeWorkspaceId)?.general === true);
+  if (general) return null;
   return (
     <button
-      onClick={() => void toggle()}
-      role="switch"
-      aria-checked={on}
-      title={
-        on
-          ? "Codex commands in this project may use the network (including local ports). Applies from the next turn."
-          : "Codex runs commands without network, so tests that start a server fail. Turn on to allow network in this project, from the next turn."
-      }
-      className={`text-[12px] ${on ? "text-warn" : "text-faint hover:text-fg"}`}
+      onClick={onToggle}
+      aria-pressed={open}
+      title={open ? "Hide the changes panel" : "Files changed in this session"}
+      className={`rounded-md border px-2 py-0.5 text-[12px] ${open ? "border-accent/60 bg-raised text-fg" : "border-line bg-raised text-muted hover:text-fg"}`}
     >
-      Network: {on ? "on" : "off"}
+      Changes{files > 0 && <span className="ml-1 tabular-nums text-muted">{files}</span>}
     </button>
   );
 }
 
-/** Claude Code's auto mode: its classifier settles permission prompts and asks only when unsure. */
-function AutoApprovalsToggle({ sessionId, on }: { sessionId: string; on: boolean }) {
+type SessionSwitch = {
+  key: string;
+  label: string;
+  on: boolean;
+  /** What on and off mean, shown in the menu (not only in a tooltip). */
+  describe: (on: boolean) => string;
+  /** On relaxes a safeguard: the header says so while it is on. */
+  relaxes: boolean;
+  toggle: () => Promise<unknown>;
+};
+
+/**
+ * The session's switches (Network, Auto approvals, YOLO, Approach gate) behind one header button.
+ * The button says what is relaxed right now, so the posture reads at a glance; the menu explains
+ * each switch in words.
+ */
+export function SessionControls({ session, workspace }: { session: PeerSession; workspace: Workspace | undefined }) {
   const api = usePeer((s) => s.api);
-  async function toggle() {
-    if (!api) return;
-    try {
-      // The server emits session.updated, which refreshes the header.
-      await api.updateSession(sessionId, { autoApprovals: !on });
-    } catch (err) {
-      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-  return (
-    <button
-      onClick={() => void toggle()}
-      role="switch"
-      aria-checked={on}
-      title={
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    root.current?.querySelector<HTMLElement>("[role=menu] button")?.focus();
+    const onDown = (e: MouseEvent) => !root.current?.contains(e.target as Node) && setOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      setOpen(false);
+      trigger.current?.focus();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const fail = (err: unknown) => usePeer.getState().setError(err instanceof Error ? err.message : String(err));
+  const update = (patch: Parameters<NonNullable<typeof api>["updateSession"]>[1]) => (api ? api.updateSession(session.id, patch) : Promise.resolve());
+  const switches: SessionSwitch[] = [];
+  if (session.runtime === "codex" && workspace)
+    switches.push({
+      key: "network",
+      label: "Network",
+      on: workspace.sandboxNetwork,
+      relaxes: true,
+      describe: (on) =>
         on
-          ? "Claude Code's classifier approves or denies permission prompts in this session (including access outside the project) and asks you only when unsure. Destructive commands and Peer's collaboration rules still come to you. Applies from the next turn."
-          : "Permission prompts in this session come to you. Turn on to let Claude Code's classifier settle them, including access outside the project; destructive commands still ask. Applies from the next turn."
-      }
-      className={`text-[12px] ${on ? "text-warn" : "text-faint hover:text-fg"}`}
-    >
-      Auto approvals: {on ? "on" : "off"}
-    </button>
-  );
-}
-
-/** YOLO: Peer approves every permission request in this session without asking. */
-function YoloToggle({ sessionId, on }: { sessionId: string; on: boolean }) {
-  const api = usePeer((s) => s.api);
-  async function toggle() {
-    if (!api) return;
-    try {
-      await api.updateSession(sessionId, { yolo: !on });
-    } catch (err) {
-      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-  return (
-    <button
-      onClick={() => void toggle()}
-      role="switch"
-      aria-checked={on}
-      title={
+          ? "Codex commands in this project may use the network, local ports included. From the next turn."
+          : "Codex runs commands without network, so tests that start a server fail. Applies to this project, from the next turn.",
+      toggle: async () => {
+        if (!api) return;
+        const ws = await api.updateWorkspace(workspace.id, { sandboxNetwork: !workspace.sandboxNetwork });
+        usePeer.setState((s) => ({ workspaces: s.workspaces.map((w) => (w.id === ws.id ? ws : w)) }));
+      },
+    });
+  if (session.runtime === "claude")
+    switches.push({
+      key: "auto",
+      label: "Auto approvals",
+      on: session.autoApprovals,
+      relaxes: true,
+      describe: (on) =>
         on
-          ? "YOLO is on: Peer approves every permission request in this session without asking, including destructive commands (rm, git push, sudo…) and escalations. Peer's collaboration rules still apply. Click to turn off."
-          : "Turn on YOLO to have Peer approve every permission request in this session without asking, including destructive commands. Collaboration (checkpoints, Learn, Discuss first) is unchanged; use Just do it for that."
-      }
-      className={on ? "yolo-on rounded-full px-2 py-0.5 text-[11px] font-semibold tracking-wide" : "text-[12px] text-faint hover:text-fg"}
-    >
-      {on ? "YOLO" : "YOLO: off"}
-    </button>
-  );
-}
-
-/** Collaborate approach gate: Peer asks before a task's edits grow past five files. */
-function ApproachGateToggle({ sessionId, on }: { sessionId: string; on: boolean }) {
-  const api = usePeer((s) => s.api);
-  async function toggle() {
-    if (!api) return;
-    try {
-      await api.updateSession(sessionId, { approachGate: !on });
-    } catch (err) {
-      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-  return (
-    <button
-      onClick={() => void toggle()}
-      role="switch"
-      aria-checked={on}
-      title={
+          ? "Claude Code's classifier settles permission prompts, access outside the project included, and asks you only when unsure. Destructive commands still ask. From the next turn."
+          : "Permission prompts in this session come to you. On lets Claude Code's classifier settle them, from the next turn.",
+      toggle: () => update({ autoApprovals: !session.autoApprovals }),
+    });
+  if (session.runtime !== "gemini")
+    switches.push({
+      key: "yolo",
+      label: "YOLO",
+      on: session.yolo,
+      relaxes: true,
+      describe: (on) =>
         on
-          ? "When a task's edits grow past five files, Peer pauses the next edit and asks you to agree before it runs. Turn off to let large tasks run without asking."
-          : "Let large tasks run without asking. Turn on to agree before a task's edits grow past five files."
-      }
-      className={`text-[12px] ${on ? "text-warn" : "text-faint hover:text-fg"}`}
-    >
-      Approach gate: {on ? "on" : "off"}
-    </button>
-  );
-}
+          ? "Peer approves every permission request in this session without asking, destructive commands included. Checkpoints, Learn and Discuss first still apply."
+          : "Permission requests come to you. On approves all of them, destructive commands included; collaboration is unchanged.",
+      toggle: () => update({ yolo: !session.yolo }),
+    });
+  if (session.mode === "collaborate")
+    switches.push({
+      key: "gate",
+      label: "Approach gate",
+      on: session.approachGate,
+      relaxes: false,
+      describe: (on) =>
+        on ? "Peer pauses a task's edits before they grow past five files and asks you to agree." : "Large tasks run without asking. On asks before a task's edits grow past five files.",
+      toggle: () => update({ approachGate: !session.approachGate }),
+    });
+  if (switches.length === 0) return null;
 
-/** Undo the last turn: its file changes are reverted and it leaves the conversation. */
-function UndoButton() {
-  const api = usePeer((s) => s.api);
-  const snapshot = usePeer((s) => s.snapshot);
-  const [busy, setBusy] = useState(false);
-  if (!snapshot || (!snapshot.undo.available && snapshot.undo.reason === NOTHING_TO_UNDO)) return null;
-  const { session, undo } = snapshot;
-
-  async function run() {
-    if (!api || !window.confirm("Undo the last turn? Every file it changed goes back to how it was before the turn, and the turn leaves the conversation.")) return;
-    setBusy(true);
-    try {
-      await api.undoTurn(session.id);
-    } catch (err) {
-      usePeer.getState().setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const relaxed = switches.filter((s) => s.relaxes && s.on);
+  const yolo = session.yolo;
   return (
-    <button
-      onClick={() => void run()}
-      disabled={!undo.available || busy}
-      title={undo.available ? "Revert the files the last turn changed and remove it from the conversation" : (undo.reason ?? undefined)}
-      className="text-[12px] text-faint hover:text-fg disabled:opacity-40 disabled:hover:text-faint"
-    >
-      {busy ? "Undoing…" : "Undo"}
-    </button>
+    <div ref={root} className="relative">
+      <button
+        ref={trigger}
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="Network, approvals, YOLO and the approach gate for this session"
+        className={
+          yolo
+            ? "yolo-on rounded-md px-2 py-0.5 text-[12px] font-semibold tracking-wide"
+            : `rounded-md border border-line bg-raised px-2 py-0.5 text-[12px] hover:text-fg ${relaxed.length ? "text-warn" : "text-muted"}`
+        }
+      >
+        {yolo ? "YOLO on" : relaxed.length ? `${relaxed.map((s) => s.label).join(" · ")} on` : "Permissions: ask"}
+        <span aria-hidden="true" className="ml-1 text-[10px]">▾</span>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Session permissions"
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+            e.preventDefault();
+            const items = [...e.currentTarget.querySelectorAll<HTMLElement>("[role=menuitemcheckbox]")];
+            const at = items.indexOf(document.activeElement as HTMLElement);
+            items[(at + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+          }}
+          className="absolute right-0 top-full z-30 mt-1.5 w-80 whitespace-normal rounded-xl border border-line bg-panel p-1.5 shadow-card">
+          {switches.map((s) => (
+            <button
+              key={s.key}
+              role="menuitemcheckbox"
+              aria-checked={s.on}
+              onClick={() => void s.toggle().catch(fail)}
+              className="flex w-full flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left hover:bg-raised focus-visible:bg-raised"
+            >
+              <span className="flex w-full items-center gap-2 text-[12px]">
+                <span className="flex-1 text-fg">{s.label}</span>
+                <span className={s.on ? (s.key === "yolo" ? "text-danger" : s.relaxes ? "text-warn" : "text-accent") : "text-muted"}>{s.on ? "On" : "Off"}</span>
+              </span>
+              <span className="text-[12px] leading-snug text-muted">{s.describe(s.on)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -358,5 +380,17 @@ function EmptyState({ hasWorkspace, general, sessionSelected }: { hasWorkspace: 
         </p>
       </div>
     </div>
+  );
+}
+
+/** What the session has used so far, from the runtime's own token reports. */
+function SessionUsage() {
+  const messages = usePeer((st) => st.messages);
+  const usage = useMemo(() => sessionUsage(messages), [messages]);
+  if (!usage) return null;
+  return (
+    <span className="text-[12px] tabular-nums text-faint" title={`This session so far\n${usageDetail(usage)}`}>
+      {formatTokens(usage.input + usage.output)} tokens
+    </span>
   );
 }

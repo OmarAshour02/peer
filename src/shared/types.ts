@@ -179,6 +179,11 @@ export interface PeerSession {
    */
   approachGate: boolean;
   /**
+   * The reasoning effort picked for this session in the composer (one of the model's levels), or
+   * null to follow Runtime settings and then the CLI's own default. Codex and Claude Code use it.
+   */
+  effort: string | null;
+  /**
    * YOLO: Peer approves every permission request in this session itself, on every runtime,
    * including destructive commands and the escalations a runtime asks for. Peer's collaboration
    * rules (checkpoints, the Learn lock, Discuss first, detected decisions) are unchanged, and a
@@ -239,8 +244,20 @@ export type PeerPart =
       diff?: string;
     }
   | { type: "patch"; id: string; files: string[] }
-  | { type: "step-finish"; id: string; tokens?: { input: number; output: number }; cost?: number }
+  | { type: "step-finish"; id: string; tokens?: TokenUsage; cost?: number; durationMs?: number }
   | { type: "file"; id: string; filename: string; mime: string };
+
+/**
+ * Tokens a turn (or one step of it) used. `input` counts every input token the model read,
+ * cached or not; `cacheRead` and `cacheWrite` say how many of them came from, or went into,
+ * the provider's prompt cache. Runtimes that don't report a field leave it out.
+ */
+export interface TokenUsage {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}
 
 export interface PeerMessageInfo {
   id: string;
@@ -279,7 +296,34 @@ export interface FileDiff {
 export interface ProviderInfo {
   id: string;
   name: string;
-  models: { id: string; name: string }[];
+  models: ModelOption[];
+}
+
+export interface ModelOption {
+  id: string;
+  name: string;
+  /** Reasoning effort levels the model takes, as the runtime reports them (Codex, Claude Code). */
+  efforts?: string[];
+  /** The level the runtime uses for this model when nothing else sets one (Codex reports it). */
+  defaultEffort?: string;
+  /** The canonical model id an alias resolves to (Claude Code: "sonnet" → "claude-sonnet-…"). */
+  resolvedModel?: string;
+}
+
+/**
+ * The effort a session runs at when it has no pick of its own, and where that comes from: Peer's
+ * Runtime settings, the CLI's own configuration, or the model's default.
+ */
+export interface EffortDefault {
+  level: string;
+  source: "settings" | "cli" | "model";
+  /** The level asked for before the CLI's own cap lowered it (Claude Code `maxEffortLevel`). */
+  cappedFrom?: string;
+}
+
+/** A reasoning effort level as a session may store it: a short lowercase word. */
+export function isEffortValue(v: unknown): v is string {
+  return typeof v === "string" && /^[a-z][a-z_-]{0,31}$/.test(v);
 }
 
 export interface ModelsResponse {
@@ -386,6 +430,27 @@ export interface SessionSnapshot {
   lastError: string | null;
   /** Whether "Undo last turn" can run now, and why not. */
   undo: UndoAvailability;
+  /** The developer's next message, written while the agent worked; it sends when the turn ends. */
+  queued: QueuedMessage | null;
+}
+
+/**
+ * What a session needs from the developer right now, for the sidebar and search: an agent waiting
+ * on an answer or a permission, an agent working, or a question a restart cut off.
+ */
+export type SessionActivityState = "waiting" | "working" | "interrupted";
+
+export interface SessionActivity {
+  sessionId: string;
+  workspaceId: string;
+  state: SessionActivityState;
+}
+
+/** A message the developer queued while the agent worked. One per session; queuing again replaces it. */
+export interface QueuedMessage {
+  text: string;
+  intent: TurnIntent;
+  queuedAt: number;
 }
 
 /** The undo reason when the session has no turn left to undo (the UI then hides the button). */
@@ -461,7 +526,13 @@ export interface RuntimeSettings {
   claudePermissionMode: ClaudePermissionMode;
   /** Codex reasoning effort (`turn/start effort`), or null for the account default. */
   codexEffort: string | null;
+  /** Claude Code effort (`low` … `max`), or null for Claude Code's own default. Lower is faster and uses fewer tokens. */
+  claudeEffort: ClaudeEffort | null;
 }
+
+/** Claude Code effort levels (the Agent SDK's `effort`). */
+export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type ClaudeEffort = (typeof CLAUDE_EFFORTS)[number];
 
 export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   claudeBin: null,
@@ -469,6 +540,7 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   geminiBin: null,
   claudePermissionMode: "acceptEdits",
   codexEffort: null,
+  claudeEffort: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -526,6 +598,11 @@ export type PeerEvent =
   /** The session's last turn was undone: its messages, diff and undo state changed. */
   | { type: "session.undone"; sessionId: string; result: UndoResult }
   | { type: "session.diff"; sessionId: string; diff: FileDiff[] }
+  /**
+   * The queued message changed. `returned` is a message that left the queue without being sent
+   * (Stop, or sending it failed with `error`): the UI puts it back in the composer.
+   */
+  | { type: "session.queued"; sessionId: string; queued: QueuedMessage | null; returned?: QueuedMessage; error?: string }
   | { type: "message.updated"; sessionId: string; message: PeerMessageInfo }
   | { type: "part.updated"; sessionId: string; messageId: string; part: PeerPart }
   | { type: "part.delta"; sessionId: string; messageId: string; partId: string; field: string; delta: string }

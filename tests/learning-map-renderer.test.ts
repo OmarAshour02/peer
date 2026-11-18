@@ -150,7 +150,7 @@ it("⌘G and Ctrl+G toggle the map from anywhere, a text field included; Alt and
   usePeer.setState({ learningMapOpen: false });
   const toggleSearch = vi.fn();
   function Shortcuts() {
-    useGlobalShortcuts(toggleSearch);
+    useGlobalShortcuts({ toggleSearch, toggleSidebar: () => {} });
     return createElement("input");
   }
   await act(async () => root.render(createElement(Shortcuts)));

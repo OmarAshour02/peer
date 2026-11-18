@@ -70,6 +70,7 @@ describe("store", () => {
       ALTER TABLE sessions DROP COLUMN approach_gate;
       ALTER TABLE sessions DROP COLUMN yolo;
       ALTER TABLE workspaces DROP COLUMN general;
+      ALTER TABLE sessions DROP COLUMN effort;
       DROP TABLE topic_links;
       DROP TABLE topic_mentions;
       DROP TABLE topics;
@@ -90,6 +91,7 @@ describe("store", () => {
     expect(b.titledByDeveloper(s.id)).toBe(false);
     expect(b.getSession(s.id)!.autoApprovals).toBe(false);
     expect(b.getSession(s.id)!.approachGate).toBe(false);
+    expect(b.getSession(s.id)!.effort).toBeNull();
     expect(b.getSession(s.id)!.yolo).toBe(false);
     expect(b.getSession(s.id)!.discussing).toBe(false);
     expect(b.getTurn("turn_old")!.relockedAt).toBeNull();

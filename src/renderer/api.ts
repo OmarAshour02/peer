@@ -2,6 +2,7 @@ import type {
   Checkpoint,
   CheckpointAction,
   CollaborationModeId,
+  EffortDefault,
   FileDiff,
   LocalServerKind,
   ModelRef,
@@ -14,9 +15,11 @@ import type {
   LearningMap,
   Preferences,
   ProviderCatalog,
+  QueuedMessage,
   RuntimeInfo,
   RuntimeKind,
   RuntimeStatus,
+  SessionActivity,
   SessionSnapshot,
   TurnIntent,
   UndoResult,
@@ -117,16 +120,22 @@ export class PeerApi {
   models = (workspaceId: string, runtime: RuntimeKind) =>
     this.request<ModelsResponse>("GET", `/workspaces/${workspaceId}/models?runtime=${encodeURIComponent(runtime)}`);
   /** Sessions across every project and Chats whose title matches; recent ones for an empty query. */
+  effortDefault = (sessionId: string) => this.request<{ default: EffortDefault | null; cap: string | null }>("GET", `/sessions/${sessionId}/effort-default`);
+  activity = () => this.request<SessionActivity[]>("GET", "/activity");
   searchSessions = (query: string) => this.request<PeerSession[]>("GET", `/sessions?q=${encodeURIComponent(query)}`);
   snapshot = (sessionId: string) => this.request<SessionSnapshot>("GET", `/sessions/${sessionId}`);
   messages = (sessionId: string) => this.request<PeerMessage[]>("GET", `/sessions/${sessionId}/messages`);
   diff = (sessionId: string) => this.request<FileDiff[]>("GET", `/sessions/${sessionId}/diff`);
-  updateSession = (sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string; autoApprovals?: boolean; approachGate?: boolean; yolo?: boolean; discussing?: boolean }) =>
+  updateSession = (sessionId: string, patch: { mode?: CollaborationModeId; model?: ModelRef | null; effort?: string | null; title?: string; autoApprovals?: boolean; approachGate?: boolean; yolo?: boolean; discussing?: boolean }) =>
     this.request<PeerSession>("PATCH", `/sessions/${sessionId}`, patch);
   undoTurn = (sessionId: string) => this.request<UndoResult>("POST", `/sessions/${sessionId}/undo`);
   deleteSession = (sessionId: string) => this.request("DELETE", `/sessions/${sessionId}`);
+  discardIfUnused = (sessionId: string) => this.request<{ deleted: boolean }>("DELETE", `/sessions/${sessionId}?ifUnused=1`);
   send = (sessionId: string, text: string, intent: TurnIntent) => this.request("POST", `/sessions/${sessionId}/messages`, { text, intent });
   abort = (sessionId: string) => this.request("POST", `/sessions/${sessionId}/abort`);
+  queue = (sessionId: string, text: string, intent: TurnIntent) =>
+    this.request<{ queued: QueuedMessage | null; sent: boolean }>("POST", `/sessions/${sessionId}/queue`, { text, intent });
+  unqueue = (sessionId: string) => this.request<{ returned: QueuedMessage | null }>("DELETE", `/sessions/${sessionId}/queue`);
   /** "Not routine, ask me": the agent's routine work in Learn is not routine; its lock closes again. */
   contestRoutine = (id: string) => this.request<Checkpoint>("POST", `/checkpoints/${id}/contest`);
   resolveCheckpoint = (id: string, action: CheckpointAction, extra: { text?: string; option?: string } = {}) =>

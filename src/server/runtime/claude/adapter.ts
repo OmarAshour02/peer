@@ -19,7 +19,10 @@ import {
 import { z } from "zod";
 import {
   CHECKPOINT_CATEGORIES,
+  CLAUDE_EFFORTS,
+  type ClaudeEffort,
   type ClaudePermissionMode,
+  type ModelOption,
   type ModelsResponse,
   type PeerMessage,
   type PermissionReply,
@@ -144,9 +147,11 @@ interface Run {
   /** Adapter clock when the turn started, and the last top-level assistant UUID it streamed. */
   startedAt: number;
   lastUuid: string | null;
+  /** The API message this run is writing now: streamed deltas and the turn's usage go to it. */
+  currentMessage?: string;
 }
 
-const FALLBACK_MODELS = [
+const FALLBACK_MODELS: ModelOption[] = [
   { id: "default", name: "Default (your Claude Code setting)" },
   { id: "sonnet", name: "Sonnet" },
   { id: "opus", name: "Opus" },
@@ -314,7 +319,14 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
     if (this.models) return this.models;
     let models = FALLBACK_MODELS;
     try {
-      models = (await this.probeModels(directory)).map((m) => ({ id: m.value, name: m.displayName || m.value }));
+      models = (await this.probeModels(directory)).map((m) => ({
+        id: m.value,
+        name: m.displayName || m.value,
+        // The effort levels this model takes; a model without effort support gets no picker.
+        ...(m.supportsEffort !== false && m.supportedEffortLevels?.length ? { efforts: [...m.supportedEffortLevels] } : {}),
+        // What an alias stands for, so per-model settings keyed by canonical name can be matched.
+        ...(m.resolvedModel ? { resolvedModel: m.resolvedModel } : {}),
+      }));
     } catch (err) {
       this.opts.log(`[claude] model list unavailable, using aliases: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -478,6 +490,8 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
           abortController: run.abort,
           ...(state.started ? { resume: claudeId } : { sessionId: claudeId }),
           model,
+          // Effort from Runtime settings; unset leaves Claude Code's own default.
+          ...(claudeEffort(input.effort) ? { effort: claudeEffort(input.effort) } : {}),
           systemPrompt: { type: "preset", preset: "claude_code", append: turn.append },
           // The developer's own Claude Code settings, CLAUDE.md files, MCP servers and permission rules apply.
           settingSources: ["user", "project", "local"],
@@ -626,9 +640,16 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       // so every record it reads belongs to a finished turn.
       this.saveState(sessionId, { turns: [...(this.state(sessionId).turns ?? []), { t: run.startedAt, u: run.lastUuid }].slice(-MAX_TURN_RECORDS) });
       this.runs.delete(sessionId);
-      for (const id of messageIds) {
+      if (error) error = cleanClaudeError(error);
+      // The turn's error shows once, on its last message. When Claude Code already wrote it as the
+      // reply (a usage limit comes as a synthetic assistant message), that text is hidden instead
+      // of showing the same sentence twice.
+      const ids = [...messageIds];
+      const last = ids.at(-1);
+      for (const id of ids) {
         transcript.failRunningTools(id, run.abort.signal.aborted ? "Stopped" : "The run ended before this finished");
-        transcript.completeMessage(id, error);
+        if (error) transcript.hideTextEqualTo(id, error);
+        transcript.completeMessage(id, id === last ? error : undefined);
       }
       if (error) this.emit({ type: "session.error", sessionId, error });
       this.emit({ type: "session.idle", sessionId });
@@ -651,9 +672,9 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
           messageIds.add(event.message.id);
           transcript.startAssistantMessage(event.message.id, { providerId: "claude", modelId: event.message.model });
           run.blockCount.set(event.message.id, 0);
-          this.currentMessage.set(sessionId, event.message.id);
+          run.currentMessage = event.message.id;
         } else if (event.type === "content_block_delta") {
-          const messageId = this.currentMessage.get(sessionId);
+          const messageId = run.currentMessage;
           if (!messageId) return undefined;
           const partId = `${messageId}:${event.index}`;
           if (event.delta.type === "text_delta") transcript.appendText(messageId, partId, "text", event.delta.text);
@@ -664,6 +685,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       case "assistant": {
         const api = message.message;
         messageIds.add(api.id);
+        run.currentMessage = api.id;
         // The fork point for undo: the last top-level assistant message of the last kept turn.
         if (!message.parent_tool_use_id && message.uuid) run.lastUuid = message.uuid;
         transcript.startAssistantMessage(api.id, { providerId: "claude", modelId: api.model });
@@ -711,11 +733,20 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
         // The turn's tokens, as OpenCode reports them: a step-finish part on the turn's last message.
         // `usage` covers this query's main agent loop (Peer runs one query per turn); `modelUsage`
         // would not do, since a resumed session's totals carry the earlier turns.
-        const messageId = this.currentMessage.get(sessionId);
+        // Only a message of this run: a turn that failed before any message (a usage limit comes
+        // as one synthetic message, without stream events) must not overwrite an earlier turn's usage.
+        const messageId = run.currentMessage;
         const u = message.usage;
-        if (messageId && u) {
-          const input = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-          transcript.upsertPart(messageId, { type: "step-finish", id: `${messageId}:usage`, tokens: { input, output: u.output_tokens ?? 0 } });
+        if (messageId && messageIds.has(messageId) && u) {
+          const cacheRead = u.cache_read_input_tokens ?? 0;
+          const cacheWrite = u.cache_creation_input_tokens ?? 0;
+          const input = (u.input_tokens ?? 0) + cacheRead + cacheWrite;
+          transcript.upsertPart(messageId, {
+            type: "step-finish",
+            id: `${messageId}:usage`,
+            tokens: { input, output: u.output_tokens ?? 0, cacheRead, cacheWrite },
+            ...(typeof message.duration_ms === "number" ? { durationMs: message.duration_ms } : {}),
+          });
         }
         if (message.subtype === "success" && !message.is_error) return undefined;
         return "result" in message && typeof message.result === "string" && message.result
@@ -729,7 +760,6 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
     }
   }
 
-  private readonly currentMessage = new Map<string, string>();
 
   /** Claude Code summarizes sessions itself; prefer that title once it exists. */
   private async refreshTitle(directory: string, lookupId: string, sessionId: string) {
@@ -741,6 +771,16 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       // keep the prompt-derived title
     }
   }
+}
+
+/** A valid Claude Code effort level, or undefined (Claude Code's own default). */
+export function claudeEffort(effort: string | null | undefined): ClaudeEffort | undefined {
+  return CLAUDE_EFFORTS.includes(effort as ClaudeEffort) ? (effort as ClaudeEffort) : undefined;
+}
+
+/** The SDK wraps a failed result as "Claude Code returned an error result: <message>"; the message is what matters. */
+export function cleanClaudeError(error: string): string {
+  return error.replace(/^(Claude Code returned an error result:\s*)+/, "").trim() || error;
 }
 
 /** A permission rule in Claude Code's settings syntax, e.g. `Bash(npm test:*)` or `Read(//src/**)`. */

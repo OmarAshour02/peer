@@ -107,6 +107,21 @@ export class Transcript {
     this.emitInfo(message);
   }
 
+  /**
+   * Hide a reply text that only repeats the turn's error (Claude Code writes a usage limit as a
+   * synthetic assistant message, then fails the turn with the same sentence), so the developer
+   * sees it once, as the error.
+   */
+  hideTextEqualTo(messageId: string, error: string) {
+    const message = this.messages.get(messageId);
+    if (!message) return;
+    const norm = (t: string) => t.replace(/\s+/g, " ").trim();
+    // The reply may arrive in several text parts; it repeats the error when they read as it together.
+    const texts = message.parts.filter((p): p is Extract<PeerPart, { type: "text" }> => p.type === "text" && !p.synthetic);
+    if (texts.length === 0 || norm(texts.map((p) => p.text).join("")) !== norm(error)) return;
+    for (const part of texts) this.upsertPart(messageId, { ...part, synthetic: true });
+  }
+
   /** Mark tool calls that never finished (stop, crash) so they don't spin forever. */
   failRunningTools(messageId: string, reason: string) {
     const message = this.messages.get(messageId);

@@ -85,7 +85,8 @@ describe("the topic note", () => {
     ].join("\n");
     const topics = parseTopicNotes(text);
     // Names are single-spaced; the later note's level wins for the same concept.
-    expect(topics.map((t) => t.name)).toEqual(["rate limiting", "Token bucket", "a", "b", "c", "d"]);
+    // At most three topics per turn: agents tend to split one concept into its parts.
+    expect(topics.map((t) => t.name)).toEqual(["rate limiting", "Token bucket", "a"]);
     expect(topics[0]!.level).toBe("demonstrated");
     // A topic is never related to itself, however it is spelled.
     expect(parseTopicNotes(note([{ name: "Rate limiting", related: ["rate-limiting", "Token bucket"] }]))[0]!.related).toEqual(["Token bucket"]);
@@ -174,6 +175,22 @@ describe("the prompt", () => {
 });
 
 describe("recording topics from turns", () => {
+  it("keeps at most three topics per turn, counting its questions' topics and its reply note together", async () => {
+    const s = await newSession();
+    await turn(s, "explain tries", note(["Tries", "Hash tables", "B-trees", "Tries"]), undefined, async () => {
+      const { checkpoint } = await ask(s, ["Radix trees", "Suffix trees", "Bloom filters", "Skip lists"], "tradeoff");
+      await resolve(checkpoint!.id, "answer", "Prefix sharing");
+    });
+    // The question came first and took the whole budget; the note's topics are new, so they are left out.
+    expect(buildLearningMap(store).topics.map((t) => t.name).sort()).toEqual(["Bloom filters", "Radix trees", "Suffix trees"]);
+    // A topic the turn already has never counts twice: the note may restate it (and raise its level).
+    await turn(s, "and tries?", note([{ name: "Tries", level: "engaged" }, "Tries"]), undefined, async () => {
+      await ask(s, ["Tries"], "tradeoff");
+    });
+    expect(topic("Tries")).toBeDefined();
+    expect(buildLearningMap(store).topics).toHaveLength(4);
+  });
+
   it("records the note of the turn's own replies only", async () => {
     const s = await newSession();
     reply(note(["Before the turn"])); // an earlier reply, outside this turn's window

@@ -13,6 +13,7 @@ import {
   type PeerEvent,
   type PeerSession,
   type RuntimeKind,
+  type RuntimeSettings,
   type SessionRunStatus,
   type Turn,
   type TurnIntent,
@@ -107,6 +108,13 @@ const RESUME_INTENT: Partial<Record<CheckpointAction, TurnIntent>> = {
 export const CONTINUATION_TEXT = "Code changes are now unlocked. Continue the task from where you stopped and implement what we agreed.";
 
 /** Told to an agent that still has undone turns in its context (Claude Code, Codex). */
+/** The reasoning effort Runtime settings set for a runtime's turns, if any. */
+export function runtimeEffort(runtime: RuntimeKind, settings: RuntimeSettings): string | undefined {
+  if (runtime === "codex") return settings.codexEffort || undefined;
+  if (runtime === "claude") return settings.claudeEffort || undefined;
+  return undefined;
+}
+
 export function undoneNote(turns: number): string {
   const which = turns === 1 ? "your previous turn" : `your previous ${turns} turns`;
   return `Undone by the developer: ${which}. Every file change from that work was reverted, so the workspace is back to how it was before it. Treat that work as discarded; do not assume any of it is still in place, and re-read files before relying on them.`;
@@ -394,8 +402,9 @@ export class CollaborationEngine {
         autoApprovals: session.autoApprovals,
         // Peer checkpoints replace the runtime's generic question tool.
         tools: { question: false },
-        // Codex reasoning effort from Runtime settings; other runtimes ignore it.
-        effort: session.runtime === "codex" ? (this.store.getPreferences().runtimeSettings.codexEffort || undefined) : undefined,
+        // Reasoning effort: the session's pick in the composer, else Runtime settings (Codex, Claude
+        // Code); other runtimes ignore it. Neither set leaves the CLI's own default.
+        effort: session.effort ?? runtimeEffort(session.runtime, this.store.getPreferences().runtimeSettings),
       });
     } catch (err) {
       if (untold > 0) this.store.addUndoneUntold(session.id, untold);

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Checkpoint, CheckpointAction, CollaborationModeId, PermissionReply, PermissionRequest } from "../../shared/types";
 import { CATEGORY_UI, CONTROL_UI } from "../modes";
 import { usePeer } from "../store";
@@ -31,6 +31,16 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
   const running = usePeer((s) => s.snapshot?.turn?.id === cp.turnId && s.snapshot?.turn?.endedAt === null && s.snapshot?.status !== "idle");
   const [text, setText] = useState("");
   const open = cp.status === "pending" || cp.status === "interrupted";
+  const card = useRef<HTMLDivElement>(null);
+  // A question that arrives takes the keyboard, unless the developer is writing somewhere: the
+  // card is where it is answered.
+  useEffect(() => {
+    if (cp.status !== "pending" || !card.current) return;
+    const active = document.activeElement;
+    const writing = (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) && active.value.trim() !== "";
+    if (writing || (active && active !== document.body && active.closest("[role=dialog]"))) return;
+    card.current.focus({ preventScroll: true });
+  }, [cp.status]);
   const resolve = (action: CheckpointAction, extra: { text?: string; option?: string } = {}) =>
     run(() => api!.resolveCheckpoint(cp.id, action, extra));
 
@@ -96,109 +106,199 @@ export function CheckpointCard({ checkpoint: cp, mode }: { checkpoint: Checkpoin
   // Peer paused a tool call itself: the options already say go ahead or not, so skipping the
   // discussion means the same as going ahead; hints are for Learn's reasoning questions.
   const peer = cp.source === "peer";
+  const kind = peer ? "Peer paused the agent" : CATEGORY_UI[cp.category];
+  const detail = peer ? (cp.decision?.kind === "contract" ? "public API change" : cp.decision?.kind === "approach" ? "large change" : "new dependency") : null;
+
+  if (!open) return <ResolvedCheckpoint checkpoint={cp} kind={kind} detail={detail} />;
+
+  /**
+   * 1–9 move to an option and the arrow keys move between them; Enter (or Space) on the option
+   * chooses it. A key never answers by itself: the card can take focus on its own, and a stray
+   * digit must not make a decision.
+   */
+  function onCardKey(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
+    const buttons = [...(card.current?.querySelectorAll<HTMLButtonElement>("[data-option]") ?? [])];
+    if (buttons.length === 0) return;
+    const at = buttons.indexOf(e.target as HTMLButtonElement);
+    const n = Number(e.key);
+    let next: number | null = null;
+    if (Number.isInteger(n) && n >= 1 && n <= buttons.length) next = n - 1;
+    else if (e.key === "ArrowDown") next = at === -1 ? 0 : Math.min(buttons.length - 1, at + 1);
+    else if (e.key === "ArrowUp") next = at === -1 ? 0 : Math.max(0, at - 1);
+    if (next === null) return;
+    e.preventDefault();
+    buttons[next]!.focus();
+  }
+
   return (
-    <div className={`my-3 rounded-xl border ${open ? "border-accent/60 bg-panel shadow-card" : "border-dashed border-line bg-raised/40"} px-4 py-3`}>
-      <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wider">
-        <span className={open ? "text-accent" : "text-faint"}>{peer ? "Peer paused the agent" : CATEGORY_UI[cp.category]}</span>
-        {peer && <span className="text-faint">· {cp.decision?.kind === "contract" ? "public API change" : cp.decision?.kind === "approach" ? "large change" : "new dependency"}</span>}
-        {cp.status === "pending" && <span className="text-faint">· the agent is waiting for you</span>}
-        {cp.status === "interrupted" && <span className="text-warn">· the run ended before you answered; answering resumes it</span>}
-        {cp.status === "cancelled" && <span className="text-faint">· cancelled</span>}
+    <div
+      ref={card}
+      tabIndex={-1}
+      role="group"
+      aria-label={`${kind}: question waiting for you`}
+      data-checkpoint-pending={cp.status === "pending" ? "" : undefined}
+      onKeyDown={onCardKey}
+      className="checkpoint-card my-3 rounded-xl border border-accent/60 bg-panel px-4 py-3 shadow-card"
+    >
+      <div className="mb-1.5 flex flex-wrap items-center gap-x-2 text-[11px] uppercase tracking-wider">
+        <span className="text-accent">{kind}</span>
+        {detail && <span className="text-muted">· {detail}</span>}
+        {cp.status === "pending" && <span className="normal-case tracking-normal text-muted">· the agent is waiting for you</span>}
+        {cp.status === "interrupted" && <span className="normal-case tracking-normal text-warn">· the run ended before you answered; answering resumes it</span>}
       </div>
       {/* Questions can carry code (a rule to diagnose, a query to read): render them as Markdown, like the context. */}
-      <StreamingMarkdown text={cp.question} live={false} className="markdown checkpoint-question text-[14px] leading-relaxed text-fg" />
-      {cp.context && (
-        <StreamingMarkdown text={cp.context} live={false} className="markdown mt-1 text-[13px] text-muted" />
-      )}
+      <StreamingMarkdown text={cp.question} live={false} className="markdown checkpoint-question text-[15px] font-semibold leading-snug text-fg" />
+      {cp.context && <StreamingMarkdown text={cp.context} live={false} className="markdown mt-1.5 text-[13px] text-muted" />}
 
       {cp.options.length > 0 && (
-        <div className="mt-3 flex flex-col gap-1.5">
-          {cp.options.map((o) => {
-            const chosen = r?.option === o.label;
-            return (
-              <button
-                key={o.label}
-                disabled={!open || busy}
-                onClick={() => resolve("choose", { option: o.label, text: text || undefined })}
-                className={`rounded-md border px-3 py-2 text-left text-[13px] ${
-                  chosen ? "border-accent bg-accent/10" : "border-line bg-bg/40"
-                } ${open ? "hover:border-accent/70" : "opacity-70"}`}
-              >
-                <div className="flex items-center gap-2">
+        <div className="mt-3 flex flex-col gap-1.5" role="group" aria-label="Options">
+          {cp.options.map((o, i) => (
+            <button
+              key={o.label}
+              data-option
+              disabled={busy}
+              aria-keyshortcuts={i < 9 ? String(i + 1) : undefined}
+              onClick={() => resolve("choose", { option: o.label, text: text || undefined })}
+              className="flex items-start gap-3 rounded-md border border-line bg-bg/40 px-3 py-2 text-left text-[13px] hover:border-accent/70 focus-visible:border-accent focus-visible:bg-accent/10 disabled:opacity-60"
+            >
+              {i < 9 && (
+                <kbd aria-hidden="true" className="mt-px shrink-0 rounded border border-line px-1.5 font-mono text-[11px] text-muted">
+                  {i + 1}
+                </kbd>
+              )}
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2">
                   <span className="font-medium text-fg">{o.label}</span>
-                  {cp.recommendation === o.label && <span className="text-[11px] text-faint">recommended</span>}
-                </div>
-                {o.description && <div className="mt-0.5 text-[12px] text-muted">{o.description}</div>}
-              </button>
-            );
-          })}
+                  {cp.recommendation === o.label && <span className="text-[11px] text-accent">recommended</span>}
+                </span>
+                {o.description && <span className="mt-0.5 block text-[12px] text-muted">{o.description}</span>}
+              </span>
+            </button>
+          ))}
+          <p className="text-[11px] text-muted">
+            {cp.options.length > 1 ? `1–${Math.min(9, cp.options.length)} or ↑↓ to move, Enter to choose` : "Enter to choose"}
+          </p>
         </div>
       )}
 
-      {open ? (
-        <div className="mt-3">
-          <textarea
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && text.trim()) {
-                e.preventDefault();
-                void resolve("answer", { text });
-              }
-            }}
-            rows={2}
-            placeholder={cp.options.length ? "Or answer in your own words…" : "Your answer…"}
-            className="w-full resize-none rounded-md border border-line bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
-          />
-          <div className="mt-2 flex flex-wrap gap-2">
-            <Btn primary disabled={busy || !text.trim()} onClick={() => resolve("answer", { text })}>
-              Answer
-            </Btn>
-            {mode === "learn" ? (
-              <>
-                <Btn disabled={busy} onClick={() => resolve("hint", { text: text || undefined })} title={CONTROL_UI.hint.hint}>
-                  {CONTROL_UI.hint.label}
+      <div className="mt-3">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && text.trim()) {
+              e.preventDefault();
+              void resolve("answer", { text });
+            }
+          }}
+          rows={2}
+          aria-label={cp.options.length ? "Answer in your own words" : "Your answer"}
+          placeholder={cp.options.length ? "Or answer in your own words… (Enter sends)" : "Your answer… (Enter sends)"}
+          className="w-full resize-none rounded-md border border-line bg-bg px-3 py-2 text-[13px] outline-none placeholder:text-faint focus:border-accent"
+        />
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Btn primary disabled={busy || !text.trim()} onClick={() => resolve("answer", { text })}>
+            Answer
+          </Btn>
+          {/* Handing over or slowing down: kept apart from answering, and quieter. */}
+          <span aria-hidden="true" className="mx-1 h-4 w-px bg-line" />
+          {mode === "learn" ? (
+            <>
+              <Btn disabled={busy} onClick={() => resolve("hint", { text: text || undefined })} title={CONTROL_UI.hint.hint}>
+                {CONTROL_UI.hint.label}
+              </Btn>
+              <Btn disabled={busy} onClick={() => resolve("direct", { text: text || undefined })} title={CONTROL_UI.answer.hint}>
+                {CONTROL_UI.answer.label}
+              </Btn>
+            </>
+          ) : (
+            <>
+              <Btn disabled={busy} onClick={() => resolve("discuss", { text: text || undefined })} title={CONTROL_UI.discuss.hint}>
+                {CONTROL_UI.discuss.label}
+              </Btn>
+              {discussing && !peer && (
+                <Btn disabled={busy} onClick={() => resolve("skip", { text: text || undefined })} title="Stop discussing and implement the agreed approach">
+                  Proceed
                 </Btn>
-                <Btn disabled={busy} onClick={() => resolve("direct", { text: text || undefined })} title={CONTROL_UI.answer.hint}>
-                  {CONTROL_UI.answer.label}
-                </Btn>
-              </>
-            ) : (
-              <>
-                <Btn disabled={busy} onClick={() => resolve("discuss", { text: text || undefined })} title={CONTROL_UI.discuss.hint}>
-                  {CONTROL_UI.discuss.label}
-                </Btn>
-                {discussing && !peer && (
-                  <Btn disabled={busy} onClick={() => resolve("skip", { text: text || undefined })} title="Stop discussing and implement the agreed approach">
-                    Proceed
-                  </Btn>
-                )}
-                <Btn disabled={busy} onClick={() => resolve("go", { text: text || undefined })} title={CONTROL_UI.delegate.hint}>
-                  {CONTROL_UI.delegate.label}
-                </Btn>
-              </>
-            )}
-            <Btn disabled={busy} onClick={() => resolve("delegate", { text: text || undefined })} title={peer ? "Let the agent go ahead" : "Let the agent make this one call"}>
-              You decide
-            </Btn>
-          </div>
+              )}
+              <Btn disabled={busy} onClick={() => resolve("go", { text: text || undefined })} title={`${CONTROL_UI.delegate.hint} Covers this question and the rest of the task.`}>
+                {CONTROL_UI.delegate.label}
+              </Btn>
+            </>
+          )}
+          <Btn
+            disabled={busy}
+            onClick={() => resolve("delegate", { text: text || undefined })}
+            title={peer ? "Let the agent go ahead with this call" : "Let the agent make this one call; later questions still come to you"}
+          >
+            {DELEGATE_ONE}
+          </Btn>
         </div>
-      ) : (
-        r && (
-          <div className="mt-2 text-[12px] text-muted">
-            <span className="text-faint">You: </span>
-            {r.action === "choose" && <>chose “{r.option}”</>}
-            {r.action === "answer" && <>“{r.text}”</>}
-            {r.action === "delegate" && <>delegated the decision to the agent</>}
-            {r.action === "skip" && <>chose to proceed</>}
-            {r.action === "go" && <>said Just do it (the agent decides the rest of this task)</>}
-            {r.action === "direct" && <>asked for the direct answer</>}
-            {r.action === "discuss" && <>asked to discuss first</>}
-            {r.action === "hint" && <>asked for a hint</>}
-            {r.action === "cancelled" && <>{r.note}</>}
-            {r.text && r.action !== "answer" && <> · “{r.text}”</>}
-          </div>
-        )
+      </div>
+    </div>
+  );
+}
+
+/** "You decide" on a question: the agent makes this one call. Named for who decides. */
+export const DELEGATE_ONE = "Agent decides this one";
+
+/**
+ * An answered (or cancelled) question: the question and what the developer chose, as a record.
+ * The options and context fold away; they open on request.
+ */
+function ResolvedCheckpoint({ checkpoint: cp, kind, detail }: { checkpoint: Checkpoint; kind: string; detail: string | null }) {
+  const [expanded, setExpanded] = useState(false);
+  const r = cp.resolution;
+  const hasMore = cp.options.length > 0 || Boolean(cp.context);
+  return (
+    <div className="my-3 rounded-xl border border-dashed border-line px-4 py-2.5">
+      <div className="mb-1 flex flex-wrap items-center gap-x-2 text-[11px] uppercase tracking-wider text-muted">
+        <span>{kind}</span>
+        {detail && <span>· {detail}</span>}
+        {cp.status === "cancelled" && <span className="normal-case tracking-normal">· cancelled</span>}
+      </div>
+      <StreamingMarkdown text={cp.question} live={false} className="markdown checkpoint-question text-[14px] font-medium leading-snug text-fg" />
+      {r && (
+        <div className="mt-1.5 text-[12px] text-fg">
+          <span className="text-muted">You: </span>
+          {r.action === "choose" && <>chose “{r.option}”</>}
+          {r.action === "answer" && <>“{r.text}”</>}
+          {r.action === "delegate" && <>let the agent decide this one</>}
+          {r.action === "skip" && <>chose to proceed</>}
+          {r.action === "go" && <>said Just do it (the agent decides the rest of this task)</>}
+          {r.action === "direct" && <>asked for the direct answer</>}
+          {r.action === "discuss" && <>asked to discuss first</>}
+          {r.action === "hint" && <>asked for a hint</>}
+          {r.action === "cancelled" && <>{r.note}</>}
+          {r.text && r.action !== "answer" && <> · “{r.text}”</>}
+        </div>
+      )}
+      {hasMore && (
+        <button onClick={() => setExpanded(!expanded)} aria-expanded={expanded} className="mt-1 text-[12px] text-muted hover:text-fg">
+          {expanded ? "Hide the details" : cp.options.length ? `Show the ${cp.options.length} options` : "Show the context"}
+        </button>
+      )}
+      {expanded && (
+        <div className="mt-2">
+          {cp.context && <StreamingMarkdown text={cp.context} live={false} className="markdown text-[13px] text-muted" />}
+          {cp.options.length > 0 && (
+            <ul className="mt-2 flex flex-col gap-1">
+              {cp.options.map((o) => {
+                const chosen = r?.option === o.label;
+                return (
+                  <li key={o.label} className={`rounded-md border px-3 py-1.5 text-[12px] ${chosen ? "border-accent/70" : "border-line"}`}>
+                    <span className={chosen ? "font-medium text-fg" : "text-muted"}>{o.label}</span>
+                    {chosen && <span className="ml-2 text-[11px] text-accent">your choice</span>}
+                    {cp.recommendation === o.label && <span className="ml-2 text-[11px] text-muted">recommended</span>}
+                    {o.description && <span className="mt-0.5 block text-muted">{o.description}</span>}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
       )}
     </div>
   );

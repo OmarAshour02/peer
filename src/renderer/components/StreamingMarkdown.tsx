@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -247,10 +248,17 @@ function remarkDisplayMathParagraphs() {
 const REMARK = [remarkGfm, remarkMath, remarkDisplayMathParagraphs];
 type KatexEntry = [typeof rehypeKatex, { throwOnError: false; strict: false; errorColor: string }];
 const KATEX: KatexEntry = [rehypeKatex, { throwOnError: false, strict: false, errorColor: "var(--color-muted)" }];
+/**
+ * Syntax colors for fenced code that names its language (highlight.js's common set). No guessing
+ * for untagged blocks: detection runs every grammar, and replies re-render on every reveal step.
+ * Diagrams and math keep their plain source for their own renderers.
+ */
+type HighlightEntry = [typeof rehypeHighlight, { detect: false; plainText: string[] }];
+export const HIGHLIGHT: HighlightEntry = [rehypeHighlight, { detect: false, plainText: ["mermaid", "math", "text", "txt", "plaintext"] }];
 
 const Markdown = memo(function Markdown({ text, streaming, settled }: { text: string; streaming: boolean; settled: Settled }) {
   const rehype = useMemo(
-    () => [KATEX, [rehypeStreamWords, { settled }] as [typeof rehypeStreamWords, { settled: Settled }]],
+    () => [KATEX, HIGHLIGHT, [rehypeStreamWords, { settled }] as [typeof rehypeStreamWords, { settled: Settled }]],
     [settled],
   );
   // A diagram renders as soon as its closing fence arrives, while the rest of the reply streams on;
@@ -273,7 +281,7 @@ const Markdown = memo(function Markdown({ text, streaming, settled }: { text: st
     [],
   );
   return (
-    <ReactMarkdown remarkPlugins={REMARK} rehypePlugins={streaming ? rehype : [KATEX]} components={components}>
+    <ReactMarkdown remarkPlugins={REMARK} rehypePlugins={streaming ? rehype : [KATEX, HIGHLIGHT]} components={components}>
       {text}
     </ReactMarkdown>
   );

@@ -18,7 +18,7 @@ describe("runtime settings validation", () => {
   it("accepts a full form and trims it", () => {
     expect(
       normalizeRuntimeSettings({ claudeBin: " /usr/local/bin/claude ", codexBin: "", geminiBin: null, claudePermissionMode: "auto", codexEffort: " high " }),
-    ).toEqual({ claudeBin: "/usr/local/bin/claude", codexBin: null, geminiBin: null, claudePermissionMode: "auto", codexEffort: "high" });
+    ).toEqual({ claudeBin: "/usr/local/bin/claude", codexBin: null, geminiBin: null, claudePermissionMode: "auto", codexEffort: "high", claudeEffort: null });
   });
 
   it("merges a partial update over the stored settings", () => {
@@ -32,6 +32,8 @@ describe("runtime settings validation", () => {
     expect(() => normalizeRuntimeSettings({ claudeBin: 42 })).toThrow(/claudeBin/);
     expect(() => normalizeRuntimeSettings({ claudePermissionMode: "yolo" })).toThrow(/claudePermissionMode/);
     expect(() => normalizeRuntimeSettings({ codexEffort: 42 })).toThrow(/codexEffort/);
+    expect(() => normalizeRuntimeSettings({ claudeEffort: "turbo" })).toThrow(/claudeEffort/);
+    expect(() => normalizeRuntimeSettings({ claudeEffort: 3 })).toThrow(/claudeEffort/);
     expect(() => normalizeRuntimeSettings({ codexBin: "x".repeat(2000) })).toThrow(/too long/);
   });
 });

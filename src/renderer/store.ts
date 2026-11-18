@@ -9,11 +9,13 @@ import type {
   PeerSession,
   RuntimeInfo,
   RuntimeKind,
+  SessionActivity,
   SessionSnapshot,
   Workspace,
 } from "../shared/types";
 import { pickDefaultRuntime } from "../shared/types";
 import type { PeerApi } from "./api";
+import { queuedAsDraft } from "./queue";
 import { applyTheme, clearPendingTheme, currentTheme, pendingTheme, syncPendingTheme } from "./theme";
 
 interface PeerState {
@@ -52,6 +54,25 @@ interface PeerState {
    * tagging: an open map reloads.
    */
   learningMapVersion: number;
+  /**
+   * Queued messages that left the queue unsent (Stop, or they failed to send), by session, for
+   * that session's composer to take back when it is on screen. Several returns to one session
+   * are kept together; nothing returned is dropped while another session is open.
+   */
+  returnedDrafts: Record<string, string>;
+  /** Ask the composer to take focus (⌘L). Bumped, never reset. */
+  composerFocus: number;
+  /**
+   * Each session's unsent composer text, kept here rather than in the composer so it survives
+   * switching sessions and opening the learning map, and so leaving a session can tell it was used.
+   */
+  drafts: Record<string, string>;
+  /** Sessions with a send or queue request on its way. */
+  sendingIn: Record<string, boolean>;
+  /** Bumped when Runtime settings are saved, so what depends on them (the default effort) reloads. */
+  settingsVersion: number;
+  /** Sessions that need the developer or are running, across every workspace, by session id. */
+  activity: Record<string, SessionActivity>;
 
   init(api: PeerApi): Promise<void>;
   selectWorkspace(id: string | null): Promise<void>;
@@ -67,6 +88,11 @@ interface PeerState {
   setProvidersOpen(open: boolean): void;
   setSettingsOpen(open: boolean): void;
   setLearningMapOpen(open: boolean): void;
+  focusComposer(): void;
+  /** Reload which sessions are waiting, working or interrupted. */
+  loadActivity(): Promise<void>;
+  /** A new session in the given workspace (default: the active one, else Chats), opened at once. */
+  newSession(workspaceId?: string): Promise<void>;
 }
 
 /**
@@ -86,6 +112,35 @@ function upsertPart(messages: PeerMessage[], messageId: string, part: PeerPart):
   const pIdx = msg.parts.findIndex((p) => p.id === part.id);
   const parts = pIdx === -1 ? [...msg.parts, part] : msg.parts.map((p, i) => (i === pIdx ? part : p));
   return messages.map((m, i) => (i === idx ? { ...msg, parts } : m));
+}
+
+/** Whether the developer has started something in a session's composer (text, or a send on its way). */
+export function sessionHasDraft(s: Pick<PeerState, "drafts" | "sendingIn">, sessionId: string): boolean {
+  return (s.drafts[sessionId] ?? "").trim() !== "" || Boolean(s.sendingIn[sessionId]);
+}
+
+/** Change one session's draft (a value, or a function of the current one). */
+export function updateDraft(sessionId: string, next: string | ((current: string) => string)) {
+  usePeer.setState((s) => {
+    const current = s.drafts[sessionId] ?? "";
+    const value = typeof next === "function" ? next(current) : next;
+    if (value === current) return {};
+    const drafts = { ...s.drafts };
+    if (value) drafts[sessionId] = value;
+    else delete drafts[sessionId];
+    return { drafts };
+  });
+}
+
+let activityTimer: ReturnType<typeof setTimeout> | null = null;
+let activityRequest = 0;
+/** Events come in bursts (a turn ending emits several); one reload per burst. */
+function scheduleActivityReload(reload: () => void) {
+  if (activityTimer) clearTimeout(activityTimer);
+  activityTimer = setTimeout(() => {
+    activityTimer = null;
+    reload();
+  }, 150);
 }
 
 const RUNTIME_ORDER: RuntimeKind[] = ["opencode", "claude", "codex", "gemini"];
@@ -129,6 +184,12 @@ export const usePeer = create<PeerState>((set, get) => ({
   settingsOpen: false,
   learningMapOpen: false,
   learningMapVersion: 0,
+  returnedDrafts: {},
+  activity: {},
+  settingsVersion: 0,
+  drafts: {},
+  sendingIn: {},
+  composerFocus: 0,
 
   async init(api) {
     set({ api });
@@ -149,6 +210,7 @@ export const usePeer = create<PeerState>((set, get) => ({
       applyTheme(movedInFlight ? currentTheme() : prefs.theme);
     }
     set({ workspaces, runtimes: health.runtimes, newRuntime: prefs.defaultRuntime, runtimeChosen: prefs.runtimeChosen, ready: true });
+    void get().loadActivity();
     // Reopen where the developer left off (workspaces are ordered by last use).
     const last = prefs.lastSessionId ? await api.snapshot(prefs.lastSessionId).catch(() => null) : null;
     const ws = workspaces.find((w) => w.id === last?.session.workspaceId) ?? workspaces.find((w) => !w.general) ?? workspaces[0];
@@ -188,11 +250,25 @@ export const usePeer = create<PeerState>((set, get) => ({
   },
 
   async selectSession(id) {
+    // Leaving a session that was never used (nothing sent, nothing typed) discards it, so new
+    // sessions opened and abandoned don't pile up. The server makes the final call.
+    // It may still be loading (no snapshot yet): then the server's check alone decides.
+    const left = get();
+    const leaving = left.activeSessionId;
+    const looksUnused = left.snapshot?.session.id === leaving ? left.messages.length === 0 && left.snapshot.turn === null : true;
+    if (left.api && leaving && leaving !== id && looksUnused && !sessionHasDraft(left, leaving)) {
+      const gone = leaving;
+      void left.api
+        .discardIfUnused(gone)
+        .then(({ deleted }) => deleted && usePeer.setState((s) => ({ sessions: s.sessions.filter((x) => x.id !== gone) })))
+        .catch(() => {});
+    }
     if (id) get().api?.setPreferences({ lastSessionId: id }).catch(() => {});
     // Freshness belongs to one viewing of a session: coming back to it (even mid-turn) shows the
     // text it already has at once.
     freshParts.clear();
     set({ activeSessionId: id, snapshot: null, messages: [], diff: [], notice: null, learningMapOpen: false });
+    // The composer (or an open question's card) takes focus as it mounts with the session.
     if (id) await get().resync();
   },
 
@@ -225,7 +301,7 @@ export const usePeer = create<PeerState>((set, get) => ({
       .then((h) => set({ runtimes: h.runtimes, newRuntime: pickDefaultRuntime(get().runtimeChosen, h.runtimes) }))
       .catch(() => {});
     const kind = get().modelsFor ?? activeRuntime(get());
-    await Promise.all([get().loadModels(kind), get().resync()]);
+    await Promise.all([get().loadModels(kind), get().resync(), get().loadActivity()]);
   },
 
   setError(error) {
@@ -248,13 +324,59 @@ export const usePeer = create<PeerState>((set, get) => ({
     set({ learningMapOpen: open });
   },
 
+  focusComposer() {
+    set((s) => ({ composerFocus: s.composerFocus + 1 }));
+  },
+
+  async loadActivity() {
+    const { api } = get();
+    if (!api) return;
+    // Requests can overlap (an event burst during a slow reload): only the latest one's answer counts.
+    const request = ++activityRequest;
+    try {
+      const list = await api.activity();
+      if (request !== activityRequest) return;
+      set({ activity: Object.fromEntries(list.map((a) => [a.sessionId, a])) });
+    } catch {
+      // Kept as it was; the next event reloads it.
+    }
+  },
+
+  async newSession(workspaceId) {
+    const { api, workspaces, activeWorkspaceId, newRuntime } = get();
+    const ws = workspaces.find((w) => w.id === (workspaceId ?? activeWorkspaceId)) ?? workspaces.find((w) => w.general);
+    if (!api || !ws) return;
+    try {
+      if (ws.id !== get().activeWorkspaceId) await get().selectWorkspace(ws.id);
+      const session = await api.createSession(ws.id, { runtime: newRuntime });
+      await get().selectSession(session.id);
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
   handleEvent(event) {
     const s = get();
+    // Any session's run starting or ending, or a question or permission opening or closing, can
+    // change what the sidebar shows for it: reload once the burst settles.
+    if (event.type === "session.status" || event.type === "checkpoint.updated" || event.type === "permission.asked" || event.type === "permission.replied") {
+      scheduleActivityReload(() => void get().loadActivity());
+    }
     // The open learning map reloads when topics are recorded, or a tagged question is answered.
     if (event.type === "learningMap.updated" || (event.type === "checkpoint.updated" && event.checkpoint.status !== "pending")) {
       set({ learningMapVersion: s.learningMapVersion + 1 });
     }
     if (event.type === "learningMap.updated") return;
+    // A queued message that comes back goes to its session's composer even if another session is on
+    // screen; the error is shown wherever the developer is.
+    if (event.type === "session.queued" && event.returned) {
+      const text = queuedAsDraft(event.returned);
+      if (text) {
+        const earlier = get().returnedDrafts[event.sessionId];
+        set({ returnedDrafts: { ...get().returnedDrafts, [event.sessionId]: earlier ? `${earlier}\n\n${text}` : text } });
+      }
+      if (event.error) set({ error: `Your queued message wasn't sent: ${event.error.trim().replace(/[.!]?$/, ".")} It is back in the message box.` });
+    }
     switch (event.type) {
       case "runtime.status": {
         const others = s.runtimes.filter((r) => r.kind !== event.runtime);
@@ -332,6 +454,9 @@ export const usePeer = create<PeerState>((set, get) => ({
         return;
       case "session.diff":
         if (event.diff.length > 0) set({ diff: event.diff });
+        return;
+      case "session.queued":
+        set({ snapshot: { ...snap, queued: event.queued } });
         return;
       case "gate.updated":
         set({ snapshot: { ...snap, gate: event.gate } });

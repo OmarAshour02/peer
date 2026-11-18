@@ -8,8 +8,12 @@ import { TOPIC_LEVELS, type TopicLevel } from "./types.js";
 export const TOPIC_NOTE_PREFIX = "<!-- peer-topics:";
 const TOPIC_NOTE_END = "-->";
 
-/** Most topics one note may record; more is noise, not a summary of one turn. */
-export const MAX_TOPICS_PER_NOTE = 6;
+/**
+ * Most topics one note may record. The prompt asks for one, rarely more: agents left to themselves
+ * split a single concept into its parts ("Trie lookup complexity", "Trie node representation"),
+ * which crowds the map. The cap is the backstop; the first ones listed are kept.
+ */
+export const MAX_TOPICS_PER_NOTE = 3;
 /** Longest topic name kept, in characters. */
 export const MAX_TOPIC_NAME = 80;
 const MAX_RELATED = 6;

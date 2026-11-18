@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useModalDialog } from "../dialog";
 import type { LocalServerInfo, OAuthStart, ProviderAuthPrompt, ProviderCatalog, ProviderEntry, ProviderSource, RuntimeInfo, RuntimeKind } from "../../shared/types";
 import { RUNTIME_UI, statusDot } from "../runtimes";
 import { runtimeInfo, usePeer } from "../store";
@@ -40,11 +41,8 @@ export function ProvidersDialog() {
       .catch((err: Error) => setLoadError(err.message));
   }, [api, ready, providersVersion]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  const dialog = useRef<HTMLDivElement>(null);
+  useModalDialog(dialog, close);
 
   const connected = catalog?.providers.filter((p) => p.connected) ?? [];
   const candidates = useMemo(() => {
@@ -66,7 +64,7 @@ export function ProvidersDialog() {
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-8" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-      <div role="dialog" aria-label="Models and providers" className="w-full max-w-xl rounded-xl border border-line bg-panel shadow-composer">
+      <div ref={dialog} role="dialog" aria-modal="true" aria-label="Models and providers" tabIndex={-1} className="w-full max-w-xl rounded-xl border border-line bg-panel shadow-composer">
         <div className="flex items-center border-b border-line px-5 py-3">
           <div className="flex-1 text-[15px] font-semibold">Models &amp; providers</div>
           <button onClick={close} className="text-[12px] text-faint hover:text-fg">

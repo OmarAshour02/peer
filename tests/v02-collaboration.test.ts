@@ -1443,9 +1443,11 @@ describe("agent compatibility", () => {
     const internals = adapter as unknown as Internals;
     const transcript = internals.transcript("c1");
     const run = { blockCount: new Map(), tools: new Map() };
-    internals.handleMessage("c1", run, transcript, { type: "stream_event", event: { type: "message_start", message: { id: "m1", model: "claude-haiku" } } }, new Set());
-    internals.handleMessage("c1", run, transcript, { type: "result", subtype: "success", is_error: false, usage: { input_tokens: 10, cache_read_input_tokens: 90, cache_creation_input_tokens: 5, output_tokens: 7 } }, new Set());
-    expect(transcript.part("m1", "m1:usage")).toEqual({ type: "step-finish", id: "m1:usage", tokens: { input: 105, output: 7 } });
+    // One run's messages, as the consume loop collects them.
+    const ids = new Set<string>();
+    internals.handleMessage("c1", run, transcript, { type: "stream_event", event: { type: "message_start", message: { id: "m1", model: "claude-haiku" } } }, ids);
+    internals.handleMessage("c1", run, transcript, { type: "result", subtype: "success", is_error: false, usage: { input_tokens: 10, cache_read_input_tokens: 90, cache_creation_input_tokens: 5, output_tokens: 7 } }, ids);
+    expect(transcript.part("m1", "m1:usage")).toEqual({ type: "step-finish", id: "m1:usage", tokens: { input: 105, output: 7, cacheRead: 90, cacheWrite: 5 } });
   });
 
   it("Codex reports a turn's tokens as OpenCode does (its totals are for the whole thread)", () => {

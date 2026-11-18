@@ -8,14 +8,19 @@ import type {
   PeerSession,
   PermissionReply,
   PermissionRequest,
+  QueuedMessage,
   RuntimeKind,
   Preferences,
+  EffortDefault,
+  SessionActivity,
   SessionSnapshot,
+  TurnIntent,
   UndoResult,
   Workspace,
 } from "../shared/types.js";
 import { DEFAULT_MODE, isPrimaryMode, pickDefaultRuntime } from "../shared/types.js";
-import { CollaborationEngine, EngineError, type EngineOptions } from "./collaboration/engine.js";
+import { CollaborationEngine, EngineError, runtimeEffort, type EngineOptions } from "./collaboration/engine.js";
+import { claudeEffortConfig, codexConfigEffort, resolveEffortDefault } from "./effort-default.js";
 import type { EventHub } from "./hub.js";
 import type { AgentRuntimeAdapter, RuntimeEvent } from "./runtime/adapter.js";
 import type { RuntimeSet } from "./runtime/set.js";
@@ -35,6 +40,8 @@ export class PeerService {
   /** Pending permission requests by id, mapped to the Peer session they belong to. */
   private readonly permissions = new Map<string, PermissionRequest>();
   private readonly lastErrors = new Map<string, string>();
+  /** Session id -> the message the developer queued while the agent worked (one per session). */
+  private readonly queue = new Map<string, QueuedMessage>();
 
   constructor(
     readonly store: Store,
@@ -45,6 +52,11 @@ export class PeerService {
     this.engine = new CollaborationEngine(store, runtimes, (e) => hub.emit(e), opts);
     this.engine.recover();
     runtimes.onEvent((e, kind) => void this.onRuntimeEvent(e, kind));
+    // A queued message goes out once the turn has ended and its idle has reached the UI, whoever
+    // reported it (the runtime, a failed start, a runtime restart).
+    hub.subscribe((e) => {
+      if (e.type === "session.status" && e.status === "idle" && this.queue.has(e.sessionId)) setImmediate(() => void this.drainQueue(e.sessionId));
+    });
   }
 
   /** The runtime a session runs on (sessions never change runtime). */
@@ -130,7 +142,7 @@ export class PeerService {
 
   updateSession(
     sessionId: string,
-    patch: { mode?: CollaborationModeId; model?: ModelRef | null; title?: string; autoApprovals?: boolean; approachGate?: boolean; yolo?: boolean; discussing?: boolean },
+    patch: { mode?: CollaborationModeId; model?: ModelRef | null; effort?: string | null; title?: string; autoApprovals?: boolean; approachGate?: boolean; yolo?: boolean; discussing?: boolean },
   ): PeerSession {
     let session = this.requireSession(sessionId);
     if (patch.mode) session = this.engine.setMode(sessionId, patch.mode);
@@ -144,6 +156,11 @@ export class PeerService {
     if (patch.model !== undefined) {
       session = this.store.updateSession(sessionId, { model: patch.model });
       this.store.logEvent(sessionId, "session.model", { runtime: session.runtime, model: patch.model });
+    }
+    if (patch.effort !== undefined && patch.effort !== session.effort) {
+      if (patch.effort !== null && session.runtime !== "codex" && session.runtime !== "claude") throw new EngineError("Only Codex and Claude Code sessions take a reasoning effort.");
+      session = this.store.updateSession(sessionId, { effort: patch.effort });
+      this.store.logEvent(sessionId, "session.effort", { runtime: session.runtime, effort: patch.effort });
     }
     if (patch.autoApprovals !== undefined && patch.autoApprovals !== session.autoApprovals) {
       session = this.store.updateSession(sessionId, { autoApprovals: patch.autoApprovals });
@@ -159,7 +176,7 @@ export class PeerService {
       // Requests already waiting on the developer are settled the same way as new ones.
       if (patch.yolo) for (const p of [...this.permissions.values()]) if (p.sessionId === sessionId) void this.yoloApprove(session, p);
     }
-    if (patch.model !== undefined || patch.title !== undefined || patch.autoApprovals !== undefined || patch.approachGate !== undefined || patch.yolo !== undefined)
+    if (patch.model !== undefined || patch.effort !== undefined || patch.title !== undefined || patch.autoApprovals !== undefined || patch.approachGate !== undefined || patch.yolo !== undefined)
       this.hub.emit({ type: "session.updated", session });
     return session;
   }
@@ -182,10 +199,29 @@ export class PeerService {
   async deleteSession(sessionId: string) {
     this.requireSession(sessionId);
     if (this.engine.statusOf(sessionId) !== "idle") await this.abort(sessionId);
+    this.queue.delete(sessionId);
     const hadTopics = this.store.sessionTopicNames(sessionId).length > 0;
     this.store.deleteSession(sessionId);
     // Its topics leave the map; every open map reloads, not only the window that deleted it.
     if (hadTopics) this.hub.emit({ type: "learningMap.updated" });
+  }
+
+  /**
+   * Delete a session the developer left without using: no turn ever started (nothing was sent),
+   * nothing running or queued, and not renamed. Returns whether it was deleted. Checked here, not
+   * in the UI, so a message still on its way can never lose its session.
+   */
+  async discardIfUnused(sessionId: string): Promise<boolean> {
+    this.requireSession(sessionId);
+    const used =
+      this.store.latestTurn(sessionId) !== null ||
+      this.engine.statusOf(sessionId) !== "idle" ||
+      this.engine.hasActiveTurn(sessionId) ||
+      this.queue.has(sessionId) ||
+      this.store.titledByDeveloper(sessionId);
+    if (used) return false;
+    await this.deleteSession(sessionId);
+    return true;
   }
 
   snapshot(sessionId: string): SessionSnapshot {
@@ -199,7 +235,61 @@ export class PeerService {
       permissions: [...this.permissions.values()].filter((p) => p.sessionId === sessionId),
       lastError: this.lastErrors.get(sessionId) ?? null,
       undo: this.engine.undoAvailability(sessionId),
+      queued: this.queue.get(sessionId) ?? null,
     };
+  }
+
+  /**
+   * The reasoning effort the session's next turn runs at when the session has no pick of its own,
+   * resolved the way the runtimes do: Runtime settings, then the CLI's configuration, then the
+   * model's default. Null when nothing says (the CLI decides) or the runtime takes no effort.
+   */
+  async effortDefault(sessionId: string): Promise<{ default: EffortDefault | null; cap: string | null }> {
+    const session = this.requireSession(sessionId);
+    if (session.runtime !== "codex" && session.runtime !== "claude") return { default: null, cap: null };
+    const settings = runtimeEffort(session.runtime, this.store.getPreferences().runtimeSettings) ?? null;
+    let directory: string;
+    try {
+      directory = this.engine.directoryOf(session);
+    } catch {
+      return { default: resolveEffortDefault({ settings }), cap: null };
+    }
+    const runtime = this.runtimeOf(session);
+    const models = await runtime.listModels(directory).catch(() => null);
+    const ref = session.model ?? models?.default ?? null;
+    const model = ref ? models?.providers.find((p) => p.id === ref.providerId)?.models.find((m) => m.id === ref.modelId) : undefined;
+    if (session.runtime === "claude") {
+      const names = [ref?.modelId, model?.resolvedModel].filter((n): n is string => Boolean(n));
+      const { level, cap } = claudeEffortConfig(directory, names);
+      return { default: resolveEffortDefault({ settings, cli: level, model: model?.defaultEffort ?? null, cap }), cap };
+    }
+    return { default: resolveEffortDefault({ settings, cli: codexConfigEffort(), model: model?.defaultEffort ?? null }), cap: null };
+  }
+
+  /**
+   * Every session that needs the developer or is running, across all workspaces: waiting (a
+   * question or a permission request is open), working, or interrupted (a question a restart cut
+   * off). Sessions with nothing going on are left out.
+   */
+  activity(): SessionActivity[] {
+    const out: SessionActivity[] = [];
+    // An interrupted question counts only while it belongs to the session's last turn: once the
+    // developer has moved on with a new message, it is history, not something waiting.
+    const interrupted = new Set(
+      this.store
+        .listCheckpointsByStatus("interrupted")
+        .filter((c) => c.turnId !== null && this.store.latestTurn(c.sessionId)?.id === c.turnId)
+        .map((c) => c.sessionId),
+    );
+    const asking = new Set([...this.permissions.values()].map((p) => p.sessionId));
+    for (const ws of this.store.listWorkspaces()) {
+      for (const s of this.store.listSessions(ws.id)) {
+        const running = this.engine.statusOf(s.id) !== "idle" || this.engine.hasActiveTurn(s.id);
+        const state = this.engine.liveCheckpoint(s.id) || asking.has(s.id) ? "waiting" : running ? "working" : interrupted.has(s.id) ? "interrupted" : null;
+        if (state) out.push({ sessionId: s.id, workspaceId: ws.id, state });
+      }
+    }
+    return out;
   }
 
   async undoLastTurn(sessionId: string): Promise<UndoResult> {
@@ -227,7 +317,71 @@ export class PeerService {
     return this.engine.sendMessage(sessionId, text, intent);
   }
 
+  /** Whether a message sent now starts a turn (nothing running, nothing waiting on the developer). */
+  private canStartNow(sessionId: string): boolean {
+    return this.engine.statusOf(sessionId) === "idle" && !this.engine.hasActiveTurn(sessionId) && !this.engine.liveCheckpoint(sessionId);
+  }
+
+  /**
+   * Queue the developer's next message while the agent works: it is sent as an ordinary message
+   * (same intent, same slash commands) once the turn ends. Queuing again replaces it. When nothing
+   * is running it is sent at once. It never answers an open checkpoint: questions are answered
+   * on their card.
+   */
+  async queueMessage(sessionId: string, text: string, intent: TurnIntent = "default"): Promise<{ queued: QueuedMessage | null; sent: boolean }> {
+    const session = this.requireSession(sessionId);
+    if (this.removingWorkspaces.has(session.workspaceId)) throw new EngineError("This project is being removed", 409);
+    if (!text.trim() && intent === "default") throw new EngineError("A queued message needs text.");
+    if (this.canStartNow(sessionId)) {
+      // A message queued just as the turn ended replaces anything queued before it.
+      this.dropQueued(sessionId);
+      await this.send(sessionId, text, intent);
+      return { queued: null, sent: true };
+    }
+    const queued: QueuedMessage = { text, intent, queuedAt: Date.now() };
+    this.queue.set(sessionId, queued);
+    this.store.logEvent(sessionId, "message.queued", { intent });
+    this.hub.emit({ type: "session.queued", sessionId, queued });
+    return { queued, sent: false };
+  }
+
+  /** Take the queued message back (to edit it, or not send it). */
+  unqueueMessage(sessionId: string): QueuedMessage | null {
+    this.requireSession(sessionId);
+    return this.dropQueued(sessionId);
+  }
+
+  private dropQueued(sessionId: string): QueuedMessage | null {
+    const queued = this.queue.get(sessionId) ?? null;
+    if (!queued) return null;
+    this.queue.delete(sessionId);
+    this.hub.emit({ type: "session.queued", sessionId, queued: null });
+    return queued;
+  }
+
+  /** The turn ended: send the queued message. If it cannot start, it goes back to the developer. */
+  private async drainQueue(sessionId: string) {
+    const queued = this.queue.get(sessionId);
+    if (!queued || !this.store.getSession(sessionId) || !this.canStartNow(sessionId)) return;
+    this.queue.delete(sessionId);
+    this.hub.emit({ type: "session.queued", sessionId, queued: null });
+    try {
+      await this.send(sessionId, queued.text, queued.intent);
+      this.store.logEvent(sessionId, "message.queued_sent", { intent: queued.intent });
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      this.store.logEvent(sessionId, "message.queued_failed", { error });
+      this.hub.emit({ type: "session.queued", sessionId, queued: null, returned: queued, error });
+    }
+  }
+
   async abort(sessionId: string) {
+    // Stop means stop: a queued message is not sent, it goes back to the composer.
+    const queued = this.queue.get(sessionId);
+    if (queued) {
+      this.queue.delete(sessionId);
+      this.hub.emit({ type: "session.queued", sessionId, queued: null, returned: queued });
+    }
     await this.engine.abort(sessionId);
     this.dropPermissions(sessionId);
   }

@@ -1,37 +1,365 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-03T12:30:23Z",
+  "generatedAt": "2026-11-18T14:45:06Z",
   "title": "Design System: Peer",
   "extensions": {
     "colorMeta": {
-      "bg": { "role": "neutral", "displayName": "Void", "canonical": "#090B09", "tonalRamp": ["#090B09", "#0F120F", "#171B16", "#262C24", "#3A4438", "#5C6B58", "#8A9A85", "#C4D2C0"] },
-      "panel": { "role": "neutral", "displayName": "Panel", "canonical": "#0F120F", "tonalRamp": ["#0A0D0A", "#0F120F", "#171B16", "#22281F", "#394233", "#5C6B58", "#93A48E", "#CBD8C6"] },
-      "accent": { "role": "primary", "displayName": "Graph-Paper Green", "canonical": "#86B985", "tonalRamp": ["#1E2B1C", "#2E4529", "#42613C", "#5E8F5C", "#86B985", "#A3CCA0", "#C2DFC0", "#E4F2E2"] },
-      "accent-deep": { "role": "primary", "displayName": "Graph-Paper Green Deep", "canonical": "#5E8F5C", "tonalRamp": ["#162111", "#22331E", "#32492C", "#466840", "#5E8F5C", "#7FAE7A", "#A9CCA4", "#D8EDD4"] },
-      "link": { "role": "secondary", "displayName": "Steel Link Blue", "canonical": "#7AA2C9", "tonalRamp": ["#16202C", "#23344A", "#33506F", "#4A719B", "#7AA2C9", "#9DBEDD", "#C0D6EC", "#E6F0F9"] },
-      "paper": { "role": "neutral", "displayName": "Paper", "canonical": "#F7F5F0", "tonalRamp": ["#292929", "#4A463F", "#6E6A61", "#898681", "#B3AFA4", "#D5D1C9", "#EDEAE3", "#F7F5F0"] },
-      "graphite": { "role": "neutral", "displayName": "Graphite", "canonical": "#292929", "tonalRamp": ["#141414", "#1F1F1F", "#292929", "#3D3D3D", "#5A5A5A", "#7D7D7D", "#A8A8A8", "#D9D9D9"] },
-      "muted-olive": { "role": "primary", "displayName": "Muted Olive", "canonical": "#606E56", "tonalRamp": ["#23281F", "#39412F", "#4C5840", "#55624D", "#606E56", "#87937A", "#ACB6A1", "#DCE2D4"] }
+      "bg": {
+        "role": "neutral",
+        "displayName": "Void",
+        "canonical": "#090B09",
+        "tonalRamp": [
+          "#090B09",
+          "#0F120F",
+          "#171B16",
+          "#262C24",
+          "#3A4438",
+          "#5C6B58",
+          "#8A9A85",
+          "#C4D2C0"
+        ]
+      },
+      "panel": {
+        "role": "neutral",
+        "displayName": "Panel",
+        "canonical": "#0F120F",
+        "tonalRamp": [
+          "#0A0D0A",
+          "#0F120F",
+          "#171B16",
+          "#22281F",
+          "#394233",
+          "#5C6B58",
+          "#93A48E",
+          "#CBD8C6"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Graph-Paper Green",
+        "canonical": "#86B985",
+        "tonalRamp": [
+          "#1E2B1C",
+          "#2E4529",
+          "#42613C",
+          "#5E8F5C",
+          "#86B985",
+          "#A3CCA0",
+          "#C2DFC0",
+          "#E4F2E2"
+        ]
+      },
+      "accent-deep": {
+        "role": "primary",
+        "displayName": "Graph-Paper Green Deep",
+        "canonical": "#5E8F5C",
+        "tonalRamp": [
+          "#162111",
+          "#22331E",
+          "#32492C",
+          "#466840",
+          "#5E8F5C",
+          "#7FAE7A",
+          "#A9CCA4",
+          "#D8EDD4"
+        ]
+      },
+      "link": {
+        "role": "secondary",
+        "displayName": "Steel Link Blue",
+        "canonical": "#7AA2C9",
+        "tonalRamp": [
+          "#16202C",
+          "#23344A",
+          "#33506F",
+          "#4A719B",
+          "#7AA2C9",
+          "#9DBEDD",
+          "#C0D6EC",
+          "#E6F0F9"
+        ]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "canonical": "#F7F5F0",
+        "tonalRamp": [
+          "#292929",
+          "#4A463F",
+          "#6E6A61",
+          "#898681",
+          "#B3AFA4",
+          "#D5D1C9",
+          "#EDEAE3",
+          "#F7F5F0"
+        ]
+      },
+      "graphite": {
+        "role": "neutral",
+        "displayName": "Graphite",
+        "canonical": "#292929",
+        "tonalRamp": [
+          "#141414",
+          "#1F1F1F",
+          "#292929",
+          "#3D3D3D",
+          "#5A5A5A",
+          "#7D7D7D",
+          "#A8A8A8",
+          "#D9D9D9"
+        ]
+      },
+      "muted-olive": {
+        "role": "primary",
+        "displayName": "Muted Olive",
+        "canonical": "#606E56",
+        "tonalRamp": [
+          "#23281F",
+          "#39412F",
+          "#4C5840",
+          "#55624D",
+          "#606E56",
+          "#87937A",
+          "#ACB6A1",
+          "#DCE2D4"
+        ]
+      },
+      "ink-gray": {
+        "role": "neutral",
+        "displayName": "Ink Gray",
+        "canonical": "#5F5C55",
+        "tonalRamp": [
+          "#1F1E1C",
+          "#31302C",
+          "#44413D",
+          "#56534D",
+          "#73706A",
+          "#9B9993",
+          "#C4C1BD",
+          "#ECEAE6"
+        ]
+      },
+      "paper-shade": {
+        "role": "neutral",
+        "displayName": "Paper Shade",
+        "canonical": "#EDEAE3",
+        "tonalRamp": [
+          "#3B3934",
+          "#5F5C55",
+          "#837F77",
+          "#A7A298",
+          "#C2BDB3",
+          "#D4D0C7",
+          "#E5E2DC",
+          "#F7F5F0"
+        ]
+      },
+      "pencil-node": {
+        "role": "neutral",
+        "displayName": "Pencil Node",
+        "canonical": "#898681",
+        "tonalRamp": [
+          "#2B2A28",
+          "#464441",
+          "#615F5B",
+          "#7C7974",
+          "#989590",
+          "#B5B3AF",
+          "#D2D0CD",
+          "#EFEEEC"
+        ]
+      },
+      "collab-ink": {
+        "role": "tertiary",
+        "displayName": "Collaborate Ink",
+        "canonical": "#2A66A3",
+        "tonalRamp": [
+          "#0D2136",
+          "#153555",
+          "#1E4874",
+          "#265C93",
+          "#4379AF",
+          "#769EC6",
+          "#A9C3DE",
+          "#DCE8F5"
+        ]
+      },
+      "learn-ink": {
+        "role": "tertiary",
+        "displayName": "Learn Ink",
+        "canonical": "#7C4DBD",
+        "tonalRamp": [
+          "#26173A",
+          "#3F265F",
+          "#573685",
+          "#7045AA",
+          "#8C63C5",
+          "#AC8ED6",
+          "#CDB9E7",
+          "#EDE4F8"
+        ]
+      },
+      "warn-ink": {
+        "role": "tertiary",
+        "displayName": "Warning Ink",
+        "canonical": "#855C05",
+        "tonalRamp": [
+          "#2B1E02",
+          "#453003",
+          "#5E4104",
+          "#785305",
+          "#957022",
+          "#B5995D",
+          "#D6C297",
+          "#F6EBD2"
+        ]
+      },
+      "danger-ink": {
+        "role": "tertiary",
+        "displayName": "Danger Ink",
+        "canonical": "#C0362C",
+        "tonalRamp": [
+          "#3D110E",
+          "#621C17",
+          "#88261F",
+          "#AD3128",
+          "#C84E45",
+          "#D87E77",
+          "#E8AEA9",
+          "#F8DEDB"
+        ]
+      },
+      "faint": {
+        "role": "neutral",
+        "displayName": "Faint",
+        "canonical": "#7D8B7A",
+        "tonalRamp": [
+          "#1C201B",
+          "#383F36",
+          "#535D51",
+          "#6F7C6C",
+          "#8C9989",
+          "#AAB4A8",
+          "#C8CFC6",
+          "#E6EAE5"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted",
+        "canonical": "#9DAA9C",
+        "tonalRamp": [
+          "#232822",
+          "#464D45",
+          "#697268",
+          "#8C978B",
+          "#A9B4A8",
+          "#C0C8BF",
+          "#D7DDD7",
+          "#EEF1EE"
+        ]
+      },
+      "warn": {
+        "role": "tertiary",
+        "displayName": "Warning Amber",
+        "canonical": "#D29922",
+        "tonalRamp": [
+          "#2E2107",
+          "#5D430F",
+          "#8C6616",
+          "#BB881E",
+          "#D7A53B",
+          "#E2BC6C",
+          "#EDD49E",
+          "#F8EBCF"
+        ]
+      }
     },
     "typographyMeta": {
-      "display": { "displayName": "Display", "purpose": "Empty-state question only, one per screen at most." },
-      "headline": { "displayName": "Headline", "purpose": "Session titles, dialog titles, checkpoint questions." },
-      "body": { "displayName": "Body", "purpose": "Transcript text, answers, settings prose." },
-      "label": { "displayName": "Label", "purpose": "Card kinds, eyebrows, timestamps; metadata only." },
-      "mono": { "displayName": "Mono", "purpose": "Code, paths, token counts, constellation labels." }
+      "display": {
+        "displayName": "Display",
+        "purpose": "Empty-state question only, one per screen at most."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Session and dialog titles, open checkpoint questions (15px/600)."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Transcript text, answers, settings prose."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Card kinds, eyebrows, timestamps; metadata only."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Code, paths, token counts, constellation labels."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Card and panel headings (14px/600)."
+      },
+      "control": {
+        "displayName": "Control",
+        "purpose": "Sidebar titles, buttons, option rows, settings fields, checkpoint context (13px)."
+      }
     },
     "shadows": [
-      { "name": "ambient-card-dark", "value": "0 8px 30px rgba(0,0,0,0.35)", "purpose": "Checkpoint cards, project card, changes panel (dark)." },
-      { "name": "ambient-card-light", "value": "0 8px 30px rgba(41,41,41,0.10)", "purpose": "Checkpoint cards, project card, changes panel (light)." },
-      { "name": "ambient-composer-dark", "value": "0 12px 40px rgba(0,0,0,0.45)", "purpose": "Composer and dialogs (dark)." },
-      { "name": "ambient-composer-light", "value": "0 12px 40px rgba(41,41,41,0.12)", "purpose": "Composer and dialogs (light)." }
+      {
+        "name": "ambient-card-dark",
+        "value": "0 8px 30px rgba(0,0,0,0.35)",
+        "purpose": "Checkpoint cards, project card, changes panel (dark)."
+      },
+      {
+        "name": "ambient-card-light",
+        "value": "0 8px 30px rgba(41,41,41,0.10)",
+        "purpose": "Checkpoint cards, project card, changes panel (light)."
+      },
+      {
+        "name": "ambient-composer-dark",
+        "value": "0 12px 40px rgba(0,0,0,0.45)",
+        "purpose": "Composer and dialogs (dark)."
+      },
+      {
+        "name": "ambient-composer-light",
+        "value": "0 12px 40px rgba(41,41,41,0.12)",
+        "purpose": "Composer and dialogs (light)."
+      }
     ],
     "motion": [
-      { "name": "ease-standard", "value": "cubic-bezier(0.4, 0, 0.2, 1)", "purpose": "Default easing for state transitions, 120-200ms." },
-      { "name": "constellation-drift", "value": "transform 60s linear infinite", "purpose": "Near-imperceptible node drift; disabled under prefers-reduced-motion." }
+      {
+        "name": "ease-standard",
+        "value": "cubic-bezier(0.4, 0, 0.2, 1)",
+        "purpose": "Default easing for state transitions, 120-200ms."
+      },
+      {
+        "name": "ease-out-expo",
+        "value": "cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Arrivals: streamed words (420ms) and the Jump to latest pill (180ms)."
+      },
+      {
+        "name": "constellation-drift",
+        "value": "transform 60s linear infinite",
+        "purpose": "Near-imperceptible node drift; disabled under prefers-reduced-motion."
+      },
+      {
+        "name": "constellation-leave",
+        "value": "900ms cubic-bezier(0.25, 0.1, 0.25, 1)",
+        "purpose": "The empty-thread figure fades out when the first message lands."
+      },
+      {
+        "name": "activity-pulse",
+        "value": "animate-pulse (2s)",
+        "purpose": "The working mark in the sidebar; off under prefers-reduced-motion."
+      }
     ],
     "breakpoints": [
-      { "name": "panel-overlay", "value": "900px" }
+      {
+        "name": "panel-overlay",
+        "value": "1100px",
+        "purpose": "Below this window width the Changes panel overlays the transcript instead of docking."
+      }
     ]
   },
   "components": [
@@ -41,7 +369,7 @@
       "refersTo": "button-primary",
       "description": "Main action in dark mode: send, confirm, save.",
       "html": "<button class=\"ds-btn-primary\">Send</button>",
-      "css": ".ds-btn-primary { background: #86B985; color: #090B09; font: 500 13px ui-sans-serif, system-ui, sans-serif; padding: 6px 14px; border: none; border-radius: 8px; cursor: pointer; transition: background 0.15s cubic-bezier(0.4,0,0.2,1); } .ds-btn-primary:hover { background: #5E8F5C; color: #E9EEE7; } .ds-btn-primary:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
+      "css": ".ds-btn-primary { background: #86B985; color: #090B09; font: 500 13px ui-sans-serif, system-ui, sans-serif; padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer; transition: background 0.15s cubic-bezier(0.4,0,0.2,1); } .ds-btn-primary:hover { background: #5E8F5C; color: #E9EEE7; } .ds-btn-primary:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
     },
     {
       "name": "Primary Button (light)",
@@ -49,7 +377,7 @@
       "refersTo": "button-primary-light",
       "description": "Main action in light mode: Muted Olive on paper.",
       "html": "<button class=\"ds-btn-primary-light\">Send</button>",
-      "css": ".ds-btn-primary-light { background: #606E56; color: #FFFFFF; font: 500 13px ui-sans-serif, system-ui, sans-serif; padding: 6px 14px; border: none; border-radius: 8px; cursor: pointer; transition: background 0.15s cubic-bezier(0.4,0,0.2,1); } .ds-btn-primary-light:hover { background: #55624D; } .ds-btn-primary-light:focus-visible { outline: 2px solid #606E56; outline-offset: 2px; }"
+      "css": ".ds-btn-primary-light { background: #606E56; color: #FFFFFF; font: 500 13px ui-sans-serif, system-ui, sans-serif; padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer; transition: background 0.15s cubic-bezier(0.4,0,0.2,1); } .ds-btn-primary-light:hover { background: #55624D; } .ds-btn-primary-light:focus-visible { outline: 2px solid #606E56; outline-offset: 2px; }"
     },
     {
       "name": "Ghost Button",
@@ -57,15 +385,7 @@
       "refersTo": "button-ghost",
       "description": "Toggles and header actions: quiet until hovered.",
       "html": "<button class=\"ds-btn-ghost\">Approach gate: off</button>",
-      "css": ".ds-btn-ghost { background: #171B16; color: #9DAA9C; font: 400 12px ui-sans-serif, system-ui, sans-serif; padding: 5px 12px; border: 1px solid #262C24; border-radius: 8px; cursor: pointer; transition: color 0.15s, border-color 0.15s; } .ds-btn-ghost:hover { color: #E9EEE7; } .ds-btn-ghost:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
-    },
-    {
-      "name": "Checkpoint Card",
-      "kind": "card",
-      "refersTo": "card-checkpoint",
-      "description": "Peer's signature card: a question the developer must answer before the agent proceeds.",
-      "html": "<div class=\"ds-card-checkpoint\"><div class=\"ds-card-kind\">Peer paused the agent · large change</div><div class=\"ds-card-q\">This task's changes have grown to 6 files. Continue?</div><button class=\"ds-card-opt\">Continue with the changes</button><button class=\"ds-card-opt\">Stop here</button></div>",
-      "css": ".ds-card-checkpoint { background: #0F120F; color: #E9EEE7; font: 400 14px/1.6 ui-sans-serif, system-ui, sans-serif; border: 1px solid #86B985; border-radius: 12px; padding: 12px 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.35); display: flex; flex-direction: column; gap: 8px; } .ds-card-kind { font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: #86B985; } .ds-card-q { font-size: 15px; font-weight: 600; } .ds-card-opt { background: #171B16; color: #E9EEE7; font: 400 13px ui-sans-serif, system-ui, sans-serif; text-align: left; padding: 8px 12px; border: 1px solid #262C24; border-radius: 8px; cursor: pointer; } .ds-card-opt:hover { border-color: #86B985; } .ds-card-opt:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
+      "css": ".ds-btn-ghost { background: #171B16; color: #9DAA9C; font: 400 12px ui-sans-serif, system-ui, sans-serif; padding: 5px 12px; border: 1px solid #262C24; border-radius: 6px; cursor: pointer; transition: color 0.15s, border-color 0.15s; } .ds-btn-ghost:hover { color: #E9EEE7; } .ds-btn-ghost:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
     },
     {
       "name": "Composer",
@@ -76,23 +396,72 @@
       "css": ".ds-composer { background: #0F120F; border: 1px solid #262C24; border-radius: 16px; padding: 12px 16px; box-shadow: 0 12px 40px rgba(0,0,0,0.45); font: 400 14px ui-sans-serif, system-ui, sans-serif; } .ds-composer-text { color: #7D8B7A; min-height: 40px; } .ds-composer-row { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; } .ds-chip { background: #171B16; color: #58A6FF; font-size: 11px; font-weight: 500; padding: 2px 8px; border: 1px solid #262C24; border-radius: 4px; } .ds-send { background: #86B985; color: #090B09; width: 32px; height: 32px; border: none; border-radius: 999px; font-size: 15px; cursor: pointer; } .ds-send:hover { background: #5E8F5C; color: #E9EEE7; } .ds-send:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
     },
     {
-      "name": "Session Row",
-      "kind": "nav",
-      "description": "One session in the sidebar: title and age, active state by tone.",
-      "html": "<div class=\"ds-session-row\"><span class=\"ds-session-title\">Fix the flaky test</span><span class=\"ds-session-age\">2h</span></div>",
-      "css": ".ds-session-row { display: flex; justify-content: space-between; gap: 8px; background: #171B16; color: #E9EEE7; font: 400 13px ui-sans-serif, system-ui, sans-serif; padding: 6px 10px; border-radius: 8px; cursor: pointer; } .ds-session-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-session-age { color: #7D8B7A; font: 400 11px ui-monospace, Menlo, monospace; } .ds-session-row:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; }"
-    },
-    {
       "name": "Text Field (light)",
       "kind": "input",
       "description": "Settings field on paper: pencil border, olive focus.",
       "html": "<input class=\"ds-field-light\" value=\"/usr/local/bin/claude\" />",
-      "css": ".ds-field-light { background: #FFFFFF; color: #292929; font: 400 13px ui-sans-serif, system-ui, sans-serif; padding: 6px 10px; border: 1px solid #D5D1C9; border-radius: 8px; width: 260px; } .ds-field-light:focus-visible { outline: 2px solid #606E56; outline-offset: 1px; border-color: #606E56; }"
+      "css": ".ds-field-light { background: #FFFFFF; color: #292929; font: 400 13px ui-sans-serif, system-ui, sans-serif; padding: 6px 10px; border: 1px solid #D5D1C9; border-radius: 6px; width: 260px; } .ds-field-light:focus-visible { outline: 2px solid #606E56; outline-offset: 1px; border-color: #606E56; }"
+    },
+    {
+      "name": "Disabled Button",
+      "kind": "button",
+      "refersTo": "button-primary-disabled",
+      "description": "Any unavailable action, Send included: Raised, Faint, no border; never a dimmed primary.",
+      "html": "<button class=\"ds-btn-disabled\" disabled>Send</button>",
+      "css": ".ds-btn-disabled { background: #171B16; color: #7D8B7A; font: 500 12px/1.4 ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif; padding: 6px 14px; border: none; border-radius: 6px; cursor: not-allowed; }"
+    },
+    {
+      "name": "Checkpoint Card",
+      "kind": "card",
+      "refersTo": "card-checkpoint",
+      "description": "An open question: the one place it is answered. Takes the keyboard; 1–9 / ↑↓ move to an option, Enter chooses.",
+      "html": "<div class=\"ds-cp\" tabindex=\"-1\"><div class=\"ds-cp-kind\">Peer paused the agent <span>· new dependency</span></div><div class=\"ds-cp-q\">Add lodash to the project?</div><button class=\"ds-cp-opt\"><kbd>1</kbd><span><b>Add it</b> <i>recommended</i></span></button><button class=\"ds-cp-opt\"><kbd>2</kbd><span><b>Don't add it</b></span></button><p class=\"ds-cp-hint\">1–2 or ↑↓ to move, Enter to choose</p><div class=\"ds-cp-actions\"><button class=\"ds-cp-answer\">Answer</button><span class=\"ds-cp-rule\"></span><button class=\"ds-cp-ghost\">Discuss first</button><button class=\"ds-cp-ghost\">Just do it</button><button class=\"ds-cp-ghost\">Agent decides this one</button></div></div>",
+      "css": ".ds-cp { background: #0F120F; color: #E9EEE7; font: 400 13px/1.5 ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif; border: 1px solid rgba(134,185,133,0.6); border-radius: 12px; padding: 12px 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.35); display: flex; flex-direction: column; gap: 6px; } .ds-cp:focus { outline: 2px solid #86B985; outline-offset: 2px; } .ds-cp-kind { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #86B985; } .ds-cp-kind span { color: #9DAA9C; } .ds-cp-q { font-size: 15px; font-weight: 600; line-height: 1.375; } .ds-cp-opt { display: flex; gap: 12px; align-items: flex-start; text-align: left; background: rgba(9,11,9,0.4); color: #E9EEE7; border: 1px solid #262C24; border-radius: 6px; padding: 8px 12px; font: inherit; } .ds-cp-opt:hover { border-color: rgba(134,185,133,0.7); } .ds-cp-opt:focus-visible { border-color: #86B985; background: rgba(134,185,133,0.1); outline: 2px solid #86B985; outline-offset: 2px; } .ds-cp-opt kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #9DAA9C; border: 1px solid #262C24; border-radius: 4px; padding: 0 6px; } .ds-cp-opt i { font-style: normal; font-size: 11px; color: #86B985; margin-left: 6px; } .ds-cp-hint { margin: 0; font-size: 11px; color: #9DAA9C; } .ds-cp-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; } .ds-cp-answer { background: rgba(134,185,133,0.15); color: #E9EEE7; border: 1px solid #86B985; border-radius: 6px; padding: 4px 12px; font: 12px ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif; } .ds-cp-rule { width: 1px; height: 16px; background: #262C24; margin: 0 4px; } .ds-cp-ghost { background: #171B16; color: #9DAA9C; border: 1px solid #262C24; border-radius: 6px; padding: 4px 12px; font: 12px ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif; } .ds-cp-ghost:hover { color: #E9EEE7; }"
+    },
+    {
+      "name": "Checkpoint Record",
+      "kind": "card",
+      "refersTo": "card-checkpoint-resolved",
+      "description": "An answered question folded to the decision: recorded, not asking.",
+      "html": "<div class=\"ds-cpr\"><div class=\"ds-cpr-kind\">Architecture</div><div class=\"ds-cpr-q\">Replace the size-tiered policy with this leveled design?</div><div class=\"ds-cpr-you\"><span>You: </span>chose “Keep both policies”</div><button class=\"ds-cpr-more\">Show the 2 options</button></div>",
+      "css": ".ds-cpr { border: 1px dashed #262C24; border-radius: 12px; padding: 10px 16px; color: #E9EEE7; font: 400 12px/1.5 ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif; } .ds-cpr-kind { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #9DAA9C; } .ds-cpr-q { font-size: 14px; font-weight: 500; margin: 4px 0 6px; } .ds-cpr-you span { color: #9DAA9C; } .ds-cpr-more { background: none; border: none; padding: 0; margin-top: 4px; color: #9DAA9C; font: inherit; cursor: pointer; } .ds-cpr-more:hover { color: #E9EEE7; }"
+    },
+    {
+      "name": "Held-call Row",
+      "kind": "custom",
+      "refersTo": "row-held",
+      "description": "A tool call Peer's gate held before it ran, on its own line with the reason in words.",
+      "html": "<div class=\"ds-held\"><span class=\"ds-held-tag\">Peer held</span><span class=\"ds-held-body\"><span class=\"ds-held-cmd\"><span>Run</span> <code>npm install lodash</code></span><span class=\"ds-held-why\">Learn mode: code changes unlock once you engage with this task.</span></span></div>",
+      "css": ".ds-held { display: flex; gap: 10px; align-items: baseline; border: 1px solid rgba(210,153,34,0.5); border-radius: 6px; padding: 6px 12px; font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif; color: #E9EEE7; } .ds-held-tag { color: #D29922; font-weight: 500; flex-shrink: 0; } .ds-held-body { display: flex; flex-direction: column; min-width: 0; } .ds-held-cmd span { color: #9DAA9C; } .ds-held-cmd code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; } .ds-held-why { color: #9DAA9C; }"
+    },
+    {
+      "name": "Queued Message Strip",
+      "kind": "custom",
+      "refersTo": "strip-queued",
+      "description": "The next message, written while the agent works; it sends when the turn ends.",
+      "html": "<div class=\"ds-queued\"><span class=\"ds-q-label\">Queued · Just do it</span><span class=\"ds-q-text\">Also add a test for the manifest</span><button>Edit</button><button>Remove</button></div>",
+      "css": ".ds-queued { display: flex; align-items: center; gap: 8px; background: #171B16; border: 1px solid #262C24; border-radius: 6px; padding: 6px 12px; font: 12px ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif; color: #E9EEE7; } .ds-q-label { color: #9DAA9C; flex-shrink: 0; } .ds-q-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-queued button { background: none; border: none; color: #9DAA9C; font: inherit; padding: 2px 6px; border-radius: 4px; cursor: pointer; } .ds-queued button:hover { color: #E9EEE7; background: rgba(9,11,9,0.6); } .ds-queued button:last-child:hover { color: #F85149; }"
+    },
+    {
+      "name": "Session Row",
+      "kind": "nav",
+      "refersTo": null,
+      "description": "Sidebar session rows with activity marks: waiting (dot), working (ring), interrupted (square).",
+      "html": "<nav class=\"ds-rows\"><button class=\"ds-row\"><span>Indexing concepts</span><i class=\"ds-mark ds-wait\" title=\"Waiting for you\"></i></button><button class=\"ds-row ds-active\" aria-current=\"page\"><span>Database indexing concepts</span><i class=\"ds-mark ds-work\" title=\"Working\"></i></button><button class=\"ds-row\"><span>Cloudflare alerting</span><i class=\"ds-mark ds-int\" title=\"Question interrupted\"></i></button></nav>",
+      "css": ".ds-rows { display: flex; flex-direction: column; gap: 2px; width: 230px; } .ds-row { display: flex; align-items: center; gap: 8px; background: none; border: none; border-radius: 4px; padding: 4px 8px; color: #9DAA9C; font: 12px ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif; text-align: left; } .ds-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-row:hover { background: rgba(23,27,22,0.6); } .ds-active { background: #171B16; color: #E9EEE7; } .ds-row:focus-visible { outline: 2px solid #86B985; outline-offset: 2px; } .ds-mark { width: 6px; height: 6px; flex-shrink: 0; } .ds-wait { background: #86B985; border-radius: 50%; } .ds-work { border: 1px solid #9DAA9C; border-radius: 50%; animation: ds-pulse 2s ease-in-out infinite; } .ds-int { background: #D29922; border-radius: 1px; } @keyframes ds-pulse { 50% { opacity: .5; } } @media (prefers-reduced-motion: reduce) { .ds-work { animation: none; } }"
+    },
+    {
+      "name": "Permissions Menu",
+      "kind": "custom",
+      "refersTo": "menu-session",
+      "description": "The session header's posture button and menu: each switch with its state and what it does.",
+      "html": "<div class=\"ds-perm\"><button class=\"ds-perm-btn\" aria-expanded=\"true\">Permissions: ask ▾</button><div class=\"ds-perm-menu\" role=\"menu\"><button role=\"menuitemcheckbox\" aria-checked=\"false\"><span><b>YOLO</b><em>Off</em></span><small>Permission requests come to you. On approves all of them, destructive commands included.</small></button><button role=\"menuitemcheckbox\" aria-checked=\"true\"><span><b>Approach gate</b><em class=\"on\">On</em></span><small>Peer pauses a task's edits before they grow past five files and asks you to agree.</small></button></div></div>",
+      "css": ".ds-perm { font: 12px/1.4 ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif; width: 320px; } .ds-perm-btn { background: #171B16; color: #9DAA9C; border: 1px solid #262C24; border-radius: 6px; padding: 2px 8px; font: inherit; } .ds-perm-menu { margin-top: 6px; background: #0F120F; border: 1px solid #262C24; border-radius: 12px; padding: 6px; box-shadow: 0 8px 30px rgba(0,0,0,0.35); } .ds-perm-menu button { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; background: none; border: none; border-radius: 8px; padding: 8px 10px; font: inherit; color: #9DAA9C; } .ds-perm-menu button:hover, .ds-perm-menu button:focus-visible { background: #171B16; } .ds-perm-menu span { display: flex; } .ds-perm-menu b { flex: 1; font-weight: 400; color: #E9EEE7; } .ds-perm-menu em { font-style: normal; } .ds-perm-menu em.on { color: #86B985; }"
     }
   ],
   "narrative": {
     "northStar": "The Constellation Graph",
-    "overview": "Peer looks like knowledge plotted in the dark. The working surface is a near-black, green-tinted void — calm as T3 Code's console — and behind the quiet moments (a new thread, an empty state, the Learning Space) a faint constellation of nodes and connecting lines drifts: graph theory, geometry, and proof sketches rendered as small scientific figures, never as decoration for its own sake. Knowledge in Peer is a network of concepts the developer has actually touched, and the interface says so visually.\n\nDark mode is home. It carries the signature: deep green-black surfaces, graph-paper green emphasis, soft ambient lift under the things that float. Light mode is a full peer, not an inversion: the developer's paper palette — Paper ground, Graphite text, Pencil Lines for structure, Muted Olive for emphasis — like working notes on good stock. Both themes share one geometry, one type system, and one behavior for every control.",
+    "overview": "Peer looks like knowledge plotted in the dark. The working surface is a near-black, green-tinted void — calm as T3 Code's console — and behind the quiet moments (a new thread, an empty state, the Learning Space) a faint constellation of nodes and connecting lines drifts: graph theory, geometry, and proof sketches rendered as small scientific figures, never as decoration for its own sake. Knowledge in Peer is a network of concepts the developer has actually touched, and the interface says so visually.\n\nDark mode is home. It carries the signature: deep green-black surfaces, graph-paper green emphasis, soft ambient lift under the things that float. Light mode is a full peer, not an inversion: the developer's paper palette — Paper ground, Graphite text, Pencil Lines for structure, Muted Olive for emphasis — like working notes on good stock. Both themes share one geometry, one type system, and one behavior for every control.\n\nThis document defines the system going forward. It supersedes the incumbent GitHub-dark palette in `src/renderer/styles.css` when implemented; component behavior, density, and keyboard-first operation carry over unchanged.",
     "keyCharacteristics": [
       "Near-black green-tinted dark theme; warm paper light theme. Never a blue-gray theme again.",
       "Graph-paper green leads in the dark; Muted Olive leads in the light. Blue survives only as links and the Collaborate mode color.",
@@ -102,27 +471,51 @@
       "Every control is fully keyboard-operable, with a visible focus ring in both themes."
     ],
     "rules": [
-      { "name": "The Constellation Rule", "body": "The node-network layer appears only on orientation surfaces — new-thread and empty states, the Learning Space, onboarding. It never sits behind a transcript, a diff, or settings: where the developer is working, the ground is still.", "section": "colors" },
-      { "name": "The Green Leads Rule", "body": "In the dark, graph-paper green is the only general accent. If a screen's loudest element is blue and it is not a link or a Collaborate marker, it is wrong.", "section": "colors" },
-      { "name": "The Paper Rule", "body": "In the light, Paper is the ground and Warm White is earned by elevation. A white sidebar on Paper, or Paper-colored cards, flatten the system — don't.", "section": "colors" },
-      { "name": "The Small Type Rule", "body": "Product UI text lives at 11–14px. Anything larger than Headline outside the empty state is a bug, not emphasis.", "section": "typography" },
-      { "name": "The Float Responsibly Rule", "body": "Shadows answer \"this floats above the work\" — composer, cards, dialogs, menus. Rows, code blocks, and inline surfaces never cast one.", "section": "elevation" }
+      {
+        "name": "The Constellation Rule",
+        "body": "The node-network layer appears only on orientation surfaces — new-thread and empty states, the Learning Space, onboarding. It never sits behind a transcript, a diff, or settings: where the developer is working, the ground is still.",
+        "section": "colors"
+      },
+      {
+        "name": "The Green Leads Rule",
+        "body": "In the dark, graph-paper green is the only general accent. If a screen's loudest element is blue and it is not a link or a Collaborate marker, it is wrong.",
+        "section": "colors"
+      },
+      {
+        "name": "The Paper Rule",
+        "body": "In the light, Paper is the ground and Warm White is earned by elevation. A white sidebar on Paper, or Paper-colored cards, flatten the system — don't.",
+        "section": "colors"
+      },
+      {
+        "name": "The Small Type Rule",
+        "body": "Product UI text lives at 11–15px. Anything larger than Headline outside the empty state is a bug, not emphasis.",
+        "section": "typography"
+      },
+      {
+        "name": "The Float Responsibly Rule",
+        "body": "Shadows answer \"this floats above the work\" — composer, cards, dialogs, menus. Rows, code blocks, and inline surfaces never cast one.",
+        "section": "elevation"
+      }
     ],
     "dos": [
-      "Do keep working surfaces still: the constellation belongs to new-thread, empty, and Learning surfaces only (The Constellation Rule).",
-      "Do spend Graph-Paper Green (dark) and Muted Olive (light) on actions, emphasis borders, and focus — and almost nothing else (The Green Leads Rule).",
-      "Do use mode colors only for collaboration meaning: mode labels, checkpoint kinds, risk and safety states.",
-      "Do lift only what floats — composer, cards, dialogs — with the ambient shadows, and separate everything else with the 1px line.",
-      "Do give every interactive element the 2px accent :focus-visible outline in both themes; keyboard-first is binding.",
-      "Do label constellation clusters only from the developer's real sessions and code. Unlabeled geometry is the honest default."
+      "**Do** keep working surfaces still: the constellation belongs to new-thread, empty, and Learning surfaces only (The Constellation Rule).",
+      "**Do** spend Graph-Paper Green (dark) and Muted Olive (light) on actions, emphasis borders, and focus — and almost nothing else (The Green Leads Rule).",
+      "**Do** use mode colors only for collaboration meaning: mode labels, checkpoint kinds, risk and safety states.",
+      "**Do** lift only what floats — composer, cards, dialogs — with the ambient shadows, and separate everything else with the 1px line.",
+      "**Do** give every interactive element the 2px accent `:focus-visible` outline in both themes; keyboard-first is binding.",
+      "**Do** label constellation clusters only from the developer's real sessions and code. Unlabeled geometry is the honest default.",
+      "**Do** give every status mark a shape as well as a color (dot, ring, square) and a name for screen readers.",
+      "**Do** keep the moment Peer enforces something visible in the transcript (held-call rows, checkpoint records): never fold it into a summary line."
     ],
     "donts": [
-      "Don't reintroduce the incumbent blue-gray GitHub-dark palette (#58A6FF as general accent, #0D1117 grounds). Blue is links and Collaborate coding now.",
-      "Don't put constellation figures, gradients, or glow behind a transcript, diff, code block, or settings form.",
-      "Don't use Soft Gray (#63665E) for body text on Paper, or Faint (#7D8B7A) for body text in the dark; both are metadata-only steps.",
-      "Don't fill chips or rows with mode colors; mode color is text and hairline, never a background wash.",
-      "Don't add a second accent, a gradient button, or an emoji anywhere in product UI.",
-      "Don't invent constellation labels, concept names, or learning data for decoration. If it isn't from the developer's real work, it isn't drawn."
+      "**Don't** reintroduce the incumbent blue-gray GitHub-dark palette (#58A6FF as general accent, #0D1117 grounds). Blue is links and Collaborate coding now.",
+      "**Don't** put constellation figures, gradients, or glow behind a transcript, diff, code block, or settings form.",
+      "**Don't** use Soft Gray (#63665E) for body text on Paper, or Faint (#7D8B7A) for body text in the dark; both are metadata-only steps.",
+      "**Don't** fill chips or rows with mode colors; mode color is text and hairline, never a background wash.",
+      "**Don't** add a second accent, a gradient button, or an emoji anywhere in product UI.",
+      "**Don't** invent constellation labels, concept names, or learning data for decoration. If it isn't from the developer's real work, it isn't drawn.",
+      "**Don't** let a single key or an empty-box click make a decision: number keys move to an option, Enter chooses; controls need a message.",
+      "**Don't** use `window.confirm` or other system dialogs in product UI; confirm in place, in the system's own surfaces."
     ]
   }
 }

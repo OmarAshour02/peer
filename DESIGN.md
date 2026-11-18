@@ -26,6 +26,13 @@ colors:
   soft-gray: "#63665E"
   muted-olive: "#606E56"
   muted-olive-deep: "#55624D"
+  ink-gray: "#5F5C55"
+  paper-shade: "#EDEAE3"
+  pencil-node: "#898681"
+  collab-ink: "#2A66A3"
+  learn-ink: "#7C4DBD"
+  warn-ink: "#855C05"
+  danger-ink: "#C0362C"
 typography:
   display:
     fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
@@ -37,11 +44,21 @@ typography:
     fontSize: "15px"
     fontWeight: 600
     lineHeight: 1.4
+  title:
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
+    fontSize: "14px"
+    fontWeight: 600
+    lineHeight: 1.4
   body:
     fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
     fontSize: "14px"
     fontWeight: 400
     lineHeight: 1.6
+  control:
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
+    fontSize: "13px"
+    fontWeight: 400
+    lineHeight: 1.5
   label:
     fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
     fontSize: "11px"
@@ -55,7 +72,8 @@ typography:
     lineHeight: 1.5
 rounded:
   sm: "4px"
-  md: "8px"
+  md: "6px"
+  inset: "8px"
   lg: "12px"
   xl: "16px"
 spacing:
@@ -80,11 +98,36 @@ components:
     textColor: "{colors.muted}"
     rounded: "{rounded.md}"
     padding: "5px 12px"
+  button-primary-disabled:
+    backgroundColor: "{colors.raised}"
+    textColor: "{colors.faint}"
+    rounded: "{rounded.md}"
+    padding: "6px 14px"
   card-checkpoint:
     backgroundColor: "{colors.panel}"
     textColor: "{colors.fg}"
     rounded: "{rounded.lg}"
     padding: "12px 16px"
+  card-checkpoint-resolved:
+    backgroundColor: "transparent"
+    textColor: "{colors.fg}"
+    rounded: "{rounded.lg}"
+    padding: "10px 16px"
+  row-held:
+    backgroundColor: "transparent"
+    textColor: "{colors.warn}"
+    rounded: "{rounded.md}"
+    padding: "6px 12px"
+  strip-queued:
+    backgroundColor: "{colors.raised}"
+    textColor: "{colors.fg}"
+    rounded: "{rounded.md}"
+    padding: "6px 12px"
+  menu-session:
+    backgroundColor: "{colors.panel}"
+    textColor: "{colors.fg}"
+    rounded: "{rounded.lg}"
+    padding: "6px"
   input-composer:
     backgroundColor: "{colors.panel}"
     textColor: "{colors.fg}"
@@ -151,7 +194,12 @@ Light theme (the developer's palette, verbatim roles):
 - **Warm White** (#FFFFFF): raised surfaces, cards, the composer — the only pure white.
 - **Pencil Lines** (#D5D1C9): borders and dividers.
 - **Graphite** (#292929): body text.
-- **Soft Gray** (#63665E): muted text and metadata on Paper; a metadata step, not a body-text step.
+- **Ink Gray** (#5F5C55): muted text on Paper (descriptions, secondary labels).
+- **Soft Gray** (#63665E): faint text and metadata on Paper; a metadata step, not a body-text step.
+- **Paper Shade** (#EDEAE3): the sidebar ground, one step darker than Paper so the working column reads as the page.
+- **Mode inks**: the mode colors deepened for paper: Collaborate (#2A66A3), Learn (#7C4DBD), Warning (#855C05), Danger (#C0362C). Same jobs as in the dark; never a fill.
+
+The token `--color-focus` survives from the retired Focus mode and is the accent's value in both themes (diff additions, "ready" marks); it is an alias, not a second green.
 
 Every text token is measured, not eyeballed: text steps and mode colors hold WCAG AA contrast (≥4.5:1) on every surface token in both themes, enforced by a test over the stylesheet tokens. The steps above were darkened/lightened one measured step from the source palette where the original values fell short (Faint, Soft Gray, Muted Olive as text on the sidebar).
 
@@ -177,11 +225,12 @@ Every text token is measured, not eyeballed: text steps and mode colors hold WCA
 - **Headline** (600, 15px, 1.4): session titles, dialog titles, checkpoint questions.
 - **Title** (600, 14px, 1.4): card headings, panel headings.
 - **Body** (400, 14px, 1.6): transcript text, answers, settings prose. Markdown in answers keeps this size and rhythm.
+- **Control** (400–500, 13px, 1.5): sidebar titles, buttons, option rows, settings fields, checkpoint context. The working size of the chrome around the conversation.
 - **Label** (500, 11px, 0.08em tracking, uppercase where eyebrow): card kinds ("Peer paused the agent"), section eyebrows, timestamps (not uppercase).
 
 ### Named Rules
 
-**The Small Type Rule.** Product UI text lives at 11–14px. Anything larger than Headline outside the empty state is a bug, not emphasis.
+**The Small Type Rule.** Product UI text lives at 11–15px. Anything larger than Headline outside the empty state is a bug, not emphasis.
 
 ## Layout
 
@@ -204,7 +253,7 @@ Soft ambient shadows do the lifting; tone and line do the separating. At rest, s
 
 ## Shapes
 
-Softly squared geometry: 4px for chips and inline code, 8px for buttons and inputs, 12px for cards, 16px for the composer and dialogs. Borders are always 1px in the theme's line color; emphasis is a 1px accent border, never a thicker stroke. The constellation layer is the one place circles and hairlines (1px, low opacity) appear as pure form.
+Softly squared geometry: 4px for chips and inline code; 6px for the controls themselves (buttons, fields, option rows, banners, code blocks); 8px for inset panels (tool cards with diffs, the mode toggle, sidebar rows); 12px for cards, dialogs, menus and popovers; 16px for the composer alone. Borders are always 1px in the theme's line color; emphasis is a 1px accent border, never a thicker stroke. The constellation layer is the one place circles and hairlines (1px, low opacity) appear as pure form.
 
 Focus is a shape too: `:focus-visible` draws a 2px accent (Graph-Paper Green / Muted Olive) outline at 2px offset on every interactive element, in both themes, with no exceptions for mouse users' convenience — keyboard-first is a product commitment (see PRODUCT.md).
 
@@ -214,10 +263,11 @@ Refined and restrained throughout: quiet surfaces, precise states, and emphasis 
 
 ### Buttons
 
-- **Shape:** gently squared (8px radius), 12–13px label.
+- **Shape:** gently squared (6px radius), 12–13px label.
 - **Primary:** Graph-Paper Green fill with Void text in the dark; Muted Olive fill with Warm White text in the light. Send is the round 32px variant of the same fill with a centered arrow icon.
 - **Hover / Focus:** primary deepens one step (accent-deep / muted-olive-deep); ghost buttons move text from muted to full foreground; focus shows the 2px accent outline.
-- **Ghost / secondary:** Raised (dark) or Warm White (light) surface, line border, muted text — the default for toggles (Network, Auto approvals, Approach gate), header actions, and settings controls. Toggles read as text switches ("Approach gate: on") rather than pill switches.
+- **Ghost / secondary:** Raised (dark) or Warm White (light) surface, line border, muted text — the default for header actions (Permissions, Changes), card hand-over controls and settings controls. Switches read as text ("Approach gate · On") in a menu row with a sentence of explanation, rather than pill switches.
+- **Disabled:** Raised surface, Faint text, no border: clearly unavailable, never a dimmed primary.
 
 ### Chips
 
@@ -225,18 +275,23 @@ Mode and control chips sit inside the composer and on checkpoint cards: Raised s
 
 ### Cards / Containers
 
-- **Checkpoint card (the signature component):** Panel surface, 12px radius, ambient card shadow, 1px Line border — or a Graph-Paper Green border when Peer is waiting on the developer. Kind eyebrow in 11px uppercase ("Peer paused the agent · large change"), question at Headline size, options as full-width Raised rows. Peer-noted (auto-resolved) cards drop the shadow and use a dashed Line border: recorded, not asking.
+- **Checkpoint card (the signature component):** while open, Panel surface, 12px radius, ambient card shadow, a Graph-Paper Green border. Kind eyebrow in 11px uppercase ("Peer paused the agent · large change"), question at Headline (15px/600), options as full-width rows numbered 1–9. It is the one place a question is answered: it takes the keyboard when it arrives (unless the developer is typing elsewhere), number keys and ↑↓ move to an option, and Enter chooses it — a key alone never decides. Answer is primary; the hand-over controls (Discuss first, Just do it, Agent decides this one) sit after a hairline, quieter. Once answered it folds to a record: dashed Line border, no shadow, the question at 14px/500 and "You: chose …", options behind "Show the options". Peer-noted (auto-resolved) cards are the same dashed record: recorded, not asking.
+- **Held-call row:** a call Peer's gate held before it ran gets its own line, never folded into "Ran 5 commands": 6px radius, 1px Warning Amber hairline, "Peer held" in amber, the command in mono, the reason in words beneath in Muted. No fill, no shadow.
 - **Permission card:** the same shell with a Warning Amber border; safety never borrows the accent.
 - **Project / changes panel:** Warm-side card floating over the canvas edge (the T3 pattern), rows separated by hairlines, diff counts in mono (additions Graph-Paper Green, deletions Danger Red).
 
 ### Inputs / Fields
 
-- **Composer:** Panel surface, 16px radius, ambient composer shadow, no visible border at rest; the placeholder is Faint. Attach and send sit bottom-right inside it; the mode/model control row is its footer.
-- **Text fields and selects (settings):** Raised/Paper surface, 1px Line (Pencil Lines) border, 8px radius, 13px text. Focus moves the border to the accent and adds the outline; error text is Danger Red at 12px (graphite-safe in the light via the same red darkened by role, never by tinting backgrounds).
+- **Composer:** Panel surface, 16px radius, ambient composer shadow, a Line border that turns accent while it has focus; the placeholder is Faint. The model picker and Effort sit bottom-left, the actions bottom-right. Idle: the mode's controls (enabled only once there is text: a control goes with a message) and Send. While the agent works the box stays writable: Stop (danger outline; Esc) and **Queue**, which holds the next message until the turn ends. A queued message shows above the box as a Raised strip ("Queued · Just do it", its text, Edit, Remove). The Collaborate/Learn toggle sits above the composer; its one-line description shows only on an empty thread.
+- **Text fields and selects (settings):** Raised/Paper surface, 1px Line (Pencil Lines) border, 6px radius, 13px text. Focus moves the border to the accent and adds the outline; error text is Danger Red at 12px (graphite-safe in the light via the same red darkened by role, never by tinting backgrounds).
 
 ### Navigation
 
-Sidebar rows: 13px title, Faint mono age at right, one line, truncated. The active session row is Raised with full-foreground text; hover is Raised at half strength. Workspace and session headers are 14px/600 with the path in 11px mono Faint beneath. The constellation layer may sit behind the sidebar's empty bottom region in the dark theme — behind no text.
+Sidebar rows: 13px title, Faint mono age at right, one line, truncated. A session that needs the developer carries a 6px mark at the right, distinct in shape as well as color: a solid accent dot (waiting for your answer or a permission), a hollow Muted ring that pulses (working), a small Warning Amber square (a question a restart interrupted); each is named for screen readers, and search results carry the same marks. A project row counts its waiting sessions ("● 2" in accent). The session list is one tab stop: arrows move, F2 renames, Delete removes; the open session is `aria-current`. The active session row is Raised with full-foreground text; hover is Raised at half strength. Workspace and session headers are 14px/600 with the path in 11px mono Faint beneath. The constellation layer may sit behind the sidebar's empty bottom region in the dark theme — behind no text.
+
+### Session header
+
+Title and path at left; at right, quiet metadata (runtime · mode, session tokens) and two ghost buttons: **Permissions** and **Changes n**. Permissions summarises the session's posture in its label ("Permissions: ask"; "Network on" in amber when something is relaxed; the red YOLO pill when YOLO is on) and opens a 12px-radius menu where each switch (Network, Auto approvals, YOLO, Approach gate) is a row with its state and one sentence on what it does. Undo is not in the header: it sits in the last turn's footer ("374k in · 6.2k out · Undo this turn") and confirms in place, never with a system dialog.
 
 ### The Constellation Layer (signature)
 
@@ -252,6 +307,8 @@ A generated SVG/canvas field of small nodes (1–2px circles in Constellation No
 - **Do** lift only what floats — composer, cards, dialogs — with the ambient shadows, and separate everything else with the 1px line.
 - **Do** give every interactive element the 2px accent `:focus-visible` outline in both themes; keyboard-first is binding.
 - **Do** label constellation clusters only from the developer's real sessions and code. Unlabeled geometry is the honest default.
+- **Do** give every status mark a shape as well as a color (dot, ring, square) and a name for screen readers.
+- **Do** keep the moment Peer enforces something visible in the transcript (held-call rows, checkpoint records): never fold it into a summary line.
 
 ### Don't:
 
@@ -261,3 +318,5 @@ A generated SVG/canvas field of small nodes (1–2px circles in Constellation No
 - **Don't** fill chips or rows with mode colors; mode color is text and hairline, never a background wash.
 - **Don't** add a second accent, a gradient button, or an emoji anywhere in product UI.
 - **Don't** invent constellation labels, concept names, or learning data for decoration. If it isn't from the developer's real work, it isn't drawn.
+- **Don't** let a single key or an empty-box click make a decision: number keys move to an option, Enter chooses; controls need a message.
+- **Don't** use `window.confirm` or other system dialogs in product UI; confirm in place, in the system's own surfaces.
