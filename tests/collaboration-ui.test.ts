@@ -139,6 +139,16 @@ describe("composer while the agent works", () => {
     expect(api.send).not.toHaveBeenCalled();
   });
 
+  it("shows the code-changes lock in a project, but not in a general chat, which has no code", async () => {
+    const gate = { kind: "engage", locked: true, reason: "Learn mode: code changes unlock once you engage with this task." } as const;
+    usePeer.setState({ snapshot: snapshot({ status: "busy", gate }), workspaces: [{ id: "w1", name: "app", path: "/app" }] as never });
+    await render(createElement(Composer));
+    expect(host.textContent).toContain("Code changes locked");
+    usePeer.setState({ workspaces: [{ id: "w1", name: "General", path: "/chats", general: true }] as never });
+    await render(createElement(Composer));
+    expect(host.textContent).not.toContain("Code changes locked");
+  });
+
   it("Esc in the message box stops the agent", async () => {
     usePeer.setState({ snapshot: snapshot({ status: "busy" }) });
     await render(createElement(Composer));

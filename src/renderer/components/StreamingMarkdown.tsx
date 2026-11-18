@@ -187,31 +187,129 @@ export function mermaidSource(pre: HastNode | undefined): string | null {
   return isMermaid ? hastText(code).replace(/\n$/, "") : null;
 }
 
-type Positioned = { position?: { start?: { offset?: number }; end?: { offset?: number } } };
+type MdNode = {
+  type: string;
+  value?: string;
+  lang?: string | null;
+  children?: MdNode[];
+  data?: Record<string, unknown>;
+  position?: { start: { offset?: number }; end: { offset?: number } };
+};
 
 /**
- * Whether a code block's closing fence is in `text`: while a reply streams, an unclosed fence runs
- * to the end of what has arrived (or of its blockquote or list item), and its source is still
- * partial. Decided from what the parser made of it, so container markers and fence-like lines
- * inside the code can't fool it: a closed block's source is its content plus exactly two lines,
- * the opening fence and a closing fence; an unclosed one has no closing line.
+ * Whether a fenced block (``` code or $$ math) has its closing fence in `src`: while a reply
+ * streams, an unclosed fence runs to the end of what has arrived (or of its blockquote or list
+ * item), and its source is still partial. Decided from what the parser made of it, so container
+ * markers and fence-like lines inside the block can't fool it: a closed block spans its content
+ * plus exactly two lines, the opening fence and a closing fence; an unclosed one has no closing line.
  */
-export function fenceClosed(text: string, pre: (HastNode & Positioned) | undefined): boolean {
-  const start = pre?.position?.start?.offset;
-  const end = pre?.position?.end?.offset;
-  const code = pre?.children?.find((c) => c.type === "element" && c.tagName === "code");
-  if (start === undefined || end === undefined || !code) return false;
+export function fenceClosed(src: string, node: MdNode): boolean {
+  const start = node.position?.start.offset;
+  const end = node.position?.end.offset;
+  if (start === undefined || end === undefined) return false;
   // Markdown line endings: \n, \r\n or a bare \r.
-  const lines = text.slice(start, end).split(/\r\n|\r|\n/);
+  const lines = src.slice(start, end).split(/\r\n|\r|\n/);
   // Container prefixes (blockquote markers, list indentation) come before a fence on its line.
-  const close = /^[\s>]*(`{3,}|~{3,})\s*$/.exec(lines[lines.length - 1]!);
-  if (lines.length < 2 || !close) return false;
-  const value = hastText(code).replace(/(\r\n|\r|\n)$/, "");
-  const contentLines = value === "" ? 0 : value.split(/\r\n|\r|\n/).length;
-  return lines.length === contentLines + 2;
+  if (lines.length < 2 || !/^[\s>]*(`{3,}|~{3,}|\${2,})\s*$/.test(lines[lines.length - 1]!)) return false;
+  // The value keeps a trailing blank content line ("A\n" for "A" then an empty line), so count it as is.
+  const value = node.value ?? "";
+  // An empty value is either no content lines or one blank one.
+  if (value === "") return lines.length === 2 || lines.length === 3;
+  return lines.length === value.split(/\r\n|\r|\n/).length + 2;
 }
 
-type MdNode = { type: string; value?: string; children?: MdNode[]; position?: { start: { offset?: number } } };
+/** Stands in for a diagram or formula whose source is still arriving. */
+const pendingBlock = (label: string): MdNode => ({
+  type: "pendingRender",
+  children: [],
+  data: { hName: "div", hProperties: { className: ["render-pending"], role: "status" }, hChildren: [{ type: "text", value: label }] },
+});
+
+/**
+ * Where a text node's first formula opener is, as an offset into its value, or -1. An opener is a
+ * `$` that isn't escaped in the source (`\\$HOME` is a literal dollar) and is followed by something
+ * other than a space or a digit (`$5` is a price). Read from the source, then mapped to the value
+ * by counting dollars from the end, since the parser drops escapes from the value and decodes
+ * entities (`&#36;` in the prose before the formula is a dollar in the value only).
+ */
+function formulaOpener(src: string, text: MdNode): number {
+  const start = text.position?.start.offset;
+  const end = text.position?.end.offset;
+  const value = text.value ?? "";
+  if (start === undefined || end === undefined) return -1;
+  const raw = src.slice(start, end);
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] !== "$") continue;
+    let slashes = 0;
+    while (raw[i - 1 - slashes] === "\\") slashes++;
+    if (slashes % 2 !== 0 || !/[^\s\d]/.test(raw[i + 1] ?? " ")) continue;
+    // The opener is the n-th dollar from the end of the source, so also of the value.
+    const fromEnd = raw.slice(i).split("$").length - 1;
+    let at = value.length;
+    for (let k = 0; k < fromEnd && at >= 0; k++) at = value.lastIndexOf("$", at - 1);
+    return at;
+  }
+  return -1;
+}
+
+/**
+ * Cut `node`'s inline content at the first formula opener, at any depth (bold, links), dropping
+ * everything after it. Returns whether it cut.
+ */
+function cutAtFormula(src: string, node: MdNode): boolean {
+  const kids = node.children ?? [];
+  for (let i = 0; i < kids.length; i++) {
+    const kid = kids[i]!;
+    let cut = false;
+    if (kid.type === "text") {
+      const at = formulaOpener(src, kid);
+      if (at >= 0) {
+        kid.value = (kid.value ?? "").slice(0, at).trimEnd();
+        cut = true;
+      }
+    } else cut = cutAtFormula(src, kid);
+    if (cut) {
+      node.children = kids.slice(0, i + 1);
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * While a reply streams, a diagram or a formula has no useful partial form: half a Mermaid source
+ * doesn't parse and half a LaTeX source shows as raw markup, then jumps when it completes. Hold
+ * each one until it is whole: an unclosed ```mermaid or $$ block shows a quiet placeholder, and an
+ * unclosed inline `$…` at the end of the text being written is kept back (the caret shows the
+ * reply is still coming) until its closing `$` arrives or the paragraph ends.
+ */
+function remarkHoldUnfinished() {
+  return (tree: MdNode, file: { value?: unknown }) => {
+    const src = typeof file.value === "string" ? file.value : String(file.value ?? "");
+    const visit = (node: MdNode) => {
+      if (!node.children) return;
+      node.children = node.children.map((child) => {
+        if (child.type === "code" && child.lang === "mermaid" && !fenceClosed(src, child)) return pendingBlock("Drawing diagram…");
+        // A one-line `$$ x $$` paragraph (remarkDisplayMathParagraphs, no position) is closed by construction.
+        if (child.type === "math" && child.position && !fenceClosed(src, child)) return pendingBlock("Typesetting formula…");
+        visit(child);
+        return child;
+      });
+    };
+    visit(tree);
+
+    // Inline math can't span paragraphs, so only the paragraph still being written can hold an
+    // unfinished formula; a lone `$` in a paragraph that has ended is just a dollar sign.
+    let last: MdNode | undefined = tree;
+    while (last?.children?.length && last.type !== "paragraph") last = last.children[last.children.length - 1];
+    if (last?.type !== "paragraph" || last.position?.end.offset === undefined) return;
+    // Still being written: only whitespace follows it, and no blank line (which ends a paragraph,
+    // also inside a blockquote).
+    const after = src.slice(last.position.end.offset).replace(/\r\n?/g, "\n");
+    if (after.trim() !== "" || /\n[ \t>]*\n/.test(after)) return;
+    cutAtFormula(src, last);
+  };
+}
 
 /** A display math node, shaped as remark-math builds one for a `$$` fence. */
 const displayMath = (value: string) => ({
@@ -246,6 +344,7 @@ function remarkDisplayMathParagraphs() {
 
 /** Math: $inline$ and $$display$$ (LaTeX), typeset by KaTeX. A malformed formula shows as its source rather than throwing. */
 const REMARK = [remarkGfm, remarkMath, remarkDisplayMathParagraphs];
+const REMARK_STREAMING = [...REMARK, remarkHoldUnfinished];
 type KatexEntry = [typeof rehypeKatex, { throwOnError: false; strict: false; errorColor: string }];
 const KATEX: KatexEntry = [rehypeKatex, { throwOnError: false, strict: false, errorColor: "var(--color-muted)" }];
 /**
@@ -262,18 +361,12 @@ const Markdown = memo(function Markdown({ text, streaming, settled }: { text: st
     [settled],
   );
   // A diagram renders as soon as its closing fence arrives, while the rest of the reply streams on;
-  // until then its source is partial and shows as code. The renderer stays the same component for
-  // the whole reply (it reads the text and the streaming state from refs), so a diagram already on
-  // screen is not redrawn when the reply finishes.
-  const textRef = useRef(text);
-  const streamingRef = useRef(streaming);
-  textRef.current = text;
-  streamingRef.current = streaming;
+  // until then remarkHoldUnfinished shows a placeholder in its place. MermaidDiagram is memoized on
+  // its source, so a diagram already on screen is not redrawn when the reply finishes.
   const components = useMemo<Components>(
     () => ({
       pre({ node, children, ...props }) {
-        const complete = !streamingRef.current || fenceClosed(textRef.current, node as (HastNode & Positioned) | undefined);
-        const source = complete ? mermaidSource(node as HastNode | undefined) : null;
+        const source = mermaidSource(node as HastNode | undefined);
         if (source !== null) return <MermaidDiagram source={source} />;
         return <pre {...props}>{children as ReactNode}</pre>;
       },
@@ -281,7 +374,7 @@ const Markdown = memo(function Markdown({ text, streaming, settled }: { text: st
     [],
   );
   return (
-    <ReactMarkdown remarkPlugins={REMARK} rehypePlugins={streaming ? rehype : [KATEX, HIGHLIGHT]} components={components}>
+    <ReactMarkdown remarkPlugins={streaming ? REMARK_STREAMING : REMARK} rehypePlugins={streaming ? rehype : [KATEX, HIGHLIGHT]} components={components}>
       {text}
     </ReactMarkdown>
   );

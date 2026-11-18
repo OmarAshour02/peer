@@ -406,6 +406,30 @@ select:focus-visible {
   display: flex;
   justify-content: center;
 }
+/* A diagram or formula still arriving while the reply streams: a quiet stand-in until it is whole. */
+@keyframes render-pending-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.markdown .render-pending {
+  margin: 0.5em 0;
+  padding: 0.7em 0.8em;
+  border: 1px dashed var(--color-line);
+  border-radius: 6px;
+  color: var(--color-muted);
+  font-size: 12px;
+  animation: render-pending-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .markdown .render-pending {
+    animation: none;
+  }
+}
 .markdown .mermaid-diagram svg {
   max-width: 100%;
   height: auto;

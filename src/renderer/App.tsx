@@ -55,8 +55,12 @@ export function App() {
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
+    // Cleanup can run before the config resolves (StrictMode mounts effects twice in development):
+    // then this run must not subscribe, or two event streams apply every streamed delta twice.
+    let cancelled = false;
     (async () => {
       const config = await resolveConfig();
+      if (cancelled) return;
       if (!config) {
         setFatal("Open Peer from the link printed by `npm run server` (it contains the access token), or use the desktop app.");
         return;
@@ -83,7 +87,10 @@ export function App() {
         setFatal(err instanceof Error ? err.message : String(err));
       }
     })();
-    return () => unsubscribe?.();
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
   }, []);
 
   if (fatal) {

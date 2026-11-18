@@ -76,12 +76,14 @@ describe("rich markdown in agent replies", () => {
   });
 
   it("draws a mermaid block as soon as its closing fence arrives, while the reply streams on", async () => {
-    // The fence is still open: its source is partial, so it stays code.
+    // The fence is still open: its source is partial, so a placeholder stands in for it.
     await show("Here is the flow:\n\n```mermaid\nflowchart LR\n  A[request] --> B", true);
     await advance(1500);
     await flush();
     expect(render).not.toHaveBeenCalled();
-    expect(host.querySelector("code.language-mermaid")).not.toBeNull();
+    expect(host.querySelector("code.language-mermaid")).toBeNull();
+    expect(host.querySelector(".render-pending")?.textContent).toBe("Drawing diagram…");
+    expect(host.textContent).not.toContain("flowchart");
 
     // The fence closes and more prose streams after it: the diagram draws now, mid-reply.
     await show(`${DIAGRAM}\nNext, the cache`, true);
@@ -108,7 +110,7 @@ describe("rich markdown in agent replies", () => {
     await advance(1500);
     await flush();
     expect(render).toHaveBeenCalledTimes(2);
-    // Still open inside the quote: code, not a diagram.
+    // Still open inside the quote: a placeholder, not a diagram.
     await show("> ```mermaid\n> flowchart LR\n> E --> F", true);
     await advance(1500);
     await flush();
@@ -118,7 +120,7 @@ describe("rich markdown in agent replies", () => {
     await advance(1500);
     await flush();
     expect(render).toHaveBeenCalledTimes(2);
-    expect(host.querySelector("code.language-mermaid")).not.toBeNull();
+    expect(host.querySelector(".render-pending")).not.toBeNull();
     // Closed with nothing after it yet (the stream stopped right at the fence).
     await show("```mermaid\nflowchart LR\nI --> J\n```", true);
     await advance(1500);
@@ -133,6 +135,107 @@ describe("rich markdown in agent replies", () => {
     await advance(1500);
     await flush();
     expect(render).toHaveBeenCalledTimes(5);
+  });
+
+  it("holds an unfinished $$ block while the reply streams, then typesets it whole", async () => {
+    await show("The sum:\n\n$$\n\\sum_{i=1}^{n} i = \\frac{n(n+1)", true);
+    await advance(1500);
+    expect(host.querySelector(".katex")).toBeNull();
+    expect(host.querySelector(".render-pending")?.textContent).toBe("Typesetting formula…");
+    expect(host.textContent).not.toContain("\\sum");
+
+    await show("The sum:\n\n$$\n\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}\n$$\n\nThen more", true);
+    await advance(1500);
+    expect(host.querySelector(".render-pending")).toBeNull();
+    expect(host.querySelector(".katex-display")).not.toBeNull();
+  });
+
+  it("an opening $$ with the formula on the same line is held too", async () => {
+    await show("Intro\n\n$$ x^2 + y", true);
+    await advance(1500);
+    expect(host.querySelector(".render-pending")).not.toBeNull();
+    await show("Intro\n\n$$ x^2 + y^2 $$", true);
+    await advance(1500);
+    expect(host.querySelector(".render-pending")).toBeNull();
+    expect(host.querySelector(".katex-display")).not.toBeNull();
+  });
+
+  it("keeps back an unfinished inline formula at the end of the text, not the prose before it", async () => {
+    await show("The cost is $\\frac{a}{b", true);
+    await advance(1500);
+    expect(host.textContent).toContain("The cost is");
+    expect(host.textContent).not.toContain("$");
+    expect(host.textContent).not.toContain("frac");
+
+    await show("The cost is $\\frac{a}{b}$ per call", true);
+    await advance(1500);
+    expect(host.querySelector(".katex")).not.toBeNull();
+    expect(host.textContent).toContain("per call");
+  });
+
+  it("a closed block whose last content line is blank renders while the reply streams", async () => {
+    await show("```mermaid\nflowchart LR\nA --> B\n\n```\n\nContinuing", true);
+    await advance(1500);
+    await flush();
+    expect(host.querySelector(".render-pending")).toBeNull();
+    expect(render).toHaveBeenCalledTimes(1);
+    await show("$$\nx^2\n\n$$\n\nContinuing", true);
+    await advance(1500);
+    expect(host.querySelector(".render-pending")).toBeNull();
+    expect(host.querySelector(".katex-display")).not.toBeNull();
+  });
+
+  it("holds an unfinished formula inside bold or a link too", async () => {
+    await show("The result is **$\\frac{a}{b**", true);
+    await advance(1500);
+    expect(host.textContent).toContain("The result is");
+    expect(host.textContent).not.toContain("frac");
+    await show("See [the $\\alpha", true);
+    await advance(1500);
+    expect(host.textContent).not.toContain("alpha");
+  });
+
+  it("an escaped dollar is a literal: the prose after it keeps streaming", async () => {
+    await show("Use \\$HOME for your home directory", true);
+    await advance(1500);
+    expect(host.textContent).toContain("$HOME for your home directory");
+    await show("Use &#36;HOME, then $\\alpha", true);
+    await advance(1500);
+    expect(host.textContent).toContain("$HOME, then");
+    expect(host.textContent).not.toContain("alpha");
+    await show("Set \\$PATH, then $\\beta", true);
+    await advance(1500);
+    expect(host.textContent).toContain("$PATH, then");
+    expect(host.textContent).not.toContain("beta");
+  });
+
+  it("a single CRLF line ending does not end the paragraph; two do", async () => {
+    await show("Compute $\\frac{a}{b\r\n", true);
+    await advance(1500);
+    expect(host.textContent).not.toContain("frac");
+    await show("A lone $x here.\r\n\r\n", true);
+    await advance(1500);
+    expect(host.textContent).toContain("$x here.");
+  });
+
+  it("does not hold prices, a paragraph that has ended, or a finished reply", async () => {
+    await show("A lone $x here.\n\n", true);
+    await advance(1500);
+    expect(host.textContent).toContain("$x here.");
+    await show("> Quoted $x here.\n>\n", true);
+    await advance(1500);
+    expect(host.textContent).toContain("$x here.");
+    await show("It costs $5 a month", true);
+    await advance(1500);
+    expect(host.textContent).toContain("$5 a month");
+    await show("A lone $x here.\n\nNext paragraph", true);
+    await advance(1500);
+    expect(host.textContent).toContain("$x here.");
+    await show("Unclosed $\\alpha at the end", false);
+    expect(host.textContent).toContain("$\\alpha at the end");
+    await show("```mermaid\nflowchart LR\nA --> B", false);
+    await flush();
+    expect(host.querySelector(".render-pending")).toBeNull();
   });
 
   it("falls back to the source when a diagram does not parse", async () => {

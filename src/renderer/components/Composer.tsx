@@ -50,6 +50,8 @@ export function Composer() {
   const input = useRef<HTMLTextAreaElement>(null);
   const modeButtons = useRef<Map<CollaborationModeId, HTMLButtonElement>>(new Map());
   const settingsVersion = usePeer((s) => s.settingsVersion);
+  // A general chat has no project folder, so there is no code for the gate to lock: no banner there.
+  const general = usePeer((s) => s.workspaces.find((w) => w.id === s.snapshot?.session.workspaceId)?.general === true);
   const modelKey = snapshot?.session.model ? `${snapshot.session.model.providerId}/${snapshot.session.model.modelId}` : "";
   // What "Default" means for this session right now, so the pill can name the level.
   const [effortDefault, setEffortDefault] = useState<EffortDefault | null>(null);
@@ -290,7 +292,7 @@ export function Composer() {
           </div>
         )}
 
-        {gate.locked && !(session.discussing && gate.kind === "hold") && (
+        {gate.locked && !general && !(session.discussing && gate.kind === "hold") && (
           <div className="mb-2 flex items-center gap-2 rounded-md border border-learn/40 bg-learn/5 px-3 py-1.5 text-[12px] text-learn">
             <span>Code changes locked</span>
             <span className="text-muted">· {gate.reason}</span>
